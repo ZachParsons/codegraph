@@ -510,16 +510,34 @@ function cgRenderGraph(container, data) {
   // box gone the node itself is the thing you'd naturally reach for.
   //
   // Dragging a node that's part of the current selection (built via
-  // shift+drag-an-area, or ctrl/cmd+click below) moves every selected
-  // node together; dragging any other node clears the selection first
-  // and moves just that one, same as before selection existed at all.
-  // A ctrl/cmd- or shift-held drag start skips that auto-clear, since
-  // holding either modifier means the user is trying to grow/shrink the
-  // selection (via the click handler below), not replace it.
+  // shift+drag-an-area, or shift/ctrl/cmd+click — see "end" below) moves
+  // every selected node together; dragging any other node clears the
+  // selection first and moves just that one, same as before selection
+  // existed at all. A modifier-held drag start skips that auto-clear,
+  // since holding one means the user is trying to grow/shrink the
+  // selection, not replace it.
+  //
+  // Click-to-toggle is handled here in "end" (checking whether any real
+  // movement happened, via the `_cgDragged` flag set in "drag") instead
+  // of a separate native "click" listener, which had a real bug: d3.drag's
+  // DEFAULT filter is `!event.ctrlKey && !event.button` (confirmed in the
+  // vendored bundle) — it rejects ctrl-held gestures outright, so
+  // "start"/"drag"/"end" never fire for those, while a shift-held gesture
+  // IS accepted and DOES fire them. That inconsistency is why ctrl+click
+  // toggling worked (nodeDrag stayed out of the way entirely, so the
+  // browser's native click fired untouched) while shift+click's highlight
+  // never appeared (nodeDrag took over the gesture but nothing was
+  // listening for its outcome). The filter below explicitly keeps ctrl
+  // allowed too, so both modifiers now drive the exact same "end" path
+  // instead of two different, inconsistently-working mechanisms.
   var nodeDrag = d3
     .drag()
+    .filter(function (event) {
+      return !event.button;
+    })
     .on("start", function (event, id) {
       d3.select(this.parentNode).raise();
+      this._cgDragged = false;
       var modifierHeld =
         event.sourceEvent &&
         (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey || event.sourceEvent.shiftKey);
@@ -529,6 +547,7 @@ function cgRenderGraph(container, data) {
       }
     })
     .on("drag", function (event, id) {
+      this._cgDragged = true;
       if (selectedIds.has(id) && selectedIds.size > 1) {
         selectedIds.forEach(function (sid) {
           pos[sid].x += event.dx;
@@ -539,29 +558,22 @@ function cgRenderGraph(container, data) {
         pos[id].y += event.dy;
       }
       redraw();
+    })
+    .on("end", function (event, id) {
+      if (this._cgDragged) return;
+      var modifierHeld =
+        event.sourceEvent &&
+        (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey || event.sourceEvent.shiftKey);
+      if (!modifierHeld) return;
+      if (selectedIds.has(id)) {
+        selectedIds.delete(id);
+      } else {
+        selectedIds.add(id);
+      }
+      updateSelectionHighlight();
     });
   var nodeCircles = nodeG.select("circle");
   nodeCircles.call(nodeDrag);
-
-  // Ctrl/cmd+click OR shift+click toggles one node in or out of the
-  // selection without disturbing the rest of it — the way to build up an
-  // arbitrary multi-node selection one click at a time, as opposed to
-  // shift+drag which selects everything in a drawn area at once (shift
-  // works for both: a held-still shift+click is a zero-distance
-  // shift+drag). A plain click (no modifier) needs no handler here:
-  // nodeDrag's "start" above already clears the selection on an
-  // unmodified click, and d3-drag still lets the browser's own click
-  // event through afterward when the gesture didn't actually move (its
-  // default clickDistance is 0).
-  nodeCircles.on("click", function (event, id) {
-    if (!(event.ctrlKey || event.metaKey || event.shiftKey)) return;
-    if (selectedIds.has(id)) {
-      selectedIds.delete(id);
-    } else {
-      selectedIds.add(id);
-    }
-    updateSelectionHighlight();
-  });
 
   clusters.select("rect").call(moduleDrag);
 
