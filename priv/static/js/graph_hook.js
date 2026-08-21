@@ -75,12 +75,13 @@ function cgRenderGraph(container, data) {
   // complaint on a shallow/wide graph — reverted, since that put depth on
   // the horizontal axis and roots off to one side instead of on top.)
   //
-  // Between-layer spacing is intentionally generous (160, vs. 80 before)
-  // so depth actually reads as vertical distance instead of everything
-  // feeling flattened into a couple of cramped rows — that's what "too
-  // shallow" meant. Within-layer spacing is only trimmed slightly (175,
-  // vs. 190) rather than aggressively, since function names are long
-  // enough that packing siblings much tighter starts overlapping labels.
+  // The 160 here only feeds sugiyama's own internal layout math (crossing
+  // minimization etc.) — it does NOT determine final on-screen vertical
+  // spacing, which is recomputed just below from the actual viewport
+  // height and level count instead of a fixed guess. Within-layer spacing
+  // is trimmed slightly (175, vs. 190 originally) rather than
+  // aggressively, since function names are long enough that packing
+  // siblings much tighter starts overlapping labels.
   var layout = d3.sugiyama().nodeSize(function () {
     return [175, 160];
   });
@@ -92,6 +93,32 @@ function cgRenderGraph(container, data) {
   var pos = {};
   Array.from(graph.nodes()).forEach(function (n) {
     pos[n.data] = { x: n.x, y: n.y };
+  });
+
+  // A fixed per-level pixel gap either wastes the viewport (few levels)
+  // or stays cramped (many levels) depending on the graph. Instead: find
+  // how many distinct depth layers sugiyama actually produced, then
+  // space them so the whole depth axis divides the viewport height
+  // evenly — level count varies per graph, so this is computed after
+  // layout rather than baked into nodeSize up front.
+  var viewportHeight = Math.max(window.innerHeight - 140, 400);
+  var layerYs = Array.from(
+    new Set(
+      Array.from(graph.nodes()).map(function (n) {
+        return Math.round(n.y * 100) / 100;
+      })
+    )
+  ).sort(function (a, b) {
+    return a - b;
+  });
+  var layerIndexByY = {};
+  layerYs.forEach(function (y, i) {
+    layerIndexByY[y] = i;
+  });
+  var levelSpacing = Math.max(viewportHeight / layerYs.length, 60);
+  Object.keys(pos).forEach(function (id) {
+    var layerIndex = layerIndexByY[Math.round(pos[id].y * 100) / 100];
+    pos[id].y = (layerIndex + 0.5) * levelSpacing;
   });
 
   var byModuleIds = {};
@@ -147,8 +174,6 @@ function cgRenderGraph(container, data) {
   var content = contentExtent();
   var width = Math.max(content.maxX - content.minX + 220, 640);
   var height = Math.max(content.maxY - content.minY + 140, 400);
-
-  var viewportHeight = Math.max(window.innerHeight - 140, 400);
 
   var svgWrap = d3
     .select(container)
