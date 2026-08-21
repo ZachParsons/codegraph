@@ -53,10 +53,14 @@ function cgRenderGraph(container, data) {
     .forEach(ensureNode);
   var edgeStatusByKey = {};
   data.edges.forEach(function (e) {
-    ensureNode(e.from);
-    ensureNode(e.to);
-    graph.link(cgNodeId(e.from), cgNodeId(e.to));
+    var a = ensureNode(e.from);
+    var b = ensureNode(e.to);
     edgeStatusByKey[cgNodeId(e.from) + "->" + cgNodeId(e.to)] = e.status;
+    // d3-dag's sugiyama layout requires a DAG; a self-call (recursion) would
+    // be a self-loop, which isn't a valid DAG edge, so it's dropped here —
+    // the node itself still renders, just without a self-referencing arrow.
+    if (a === b) return;
+    graph.link(a, b);
   });
 
   var layout = d3.sugiyama().nodeSize(function () {
@@ -66,15 +70,43 @@ function cgRenderGraph(container, data) {
   var width = Math.max(extent.width + 220, 640);
   var height = Math.max(extent.height + 140, 400);
 
-  var svg = d3
+  var viewportHeight = Math.max(window.innerHeight - 140, 400);
+
+  var svgWrap = d3
     .select(container)
+    .append("div")
+    .style("width", "100%")
+    .style("height", viewportHeight + "px")
+    .style("overflow", "hidden")
+    .style("background", "#0b0b0f")
+    .style("cursor", "grab");
+
+  var svg = svgWrap
     .append("svg")
     .attr("width", "100%")
-    .attr("viewBox", "0 0 " + width + " " + height)
-    .style("background", "#0b0b0f")
+    .attr("height", "100%")
     .style("display", "block");
 
-  var root = svg.append("g").attr("transform", "translate(110, 70)");
+  var zoomLayer = svg.append("g");
+  var root = zoomLayer.append("g").attr("transform", "translate(110, 70)");
+
+  // Large graphs render far wider/taller than any viewport, so start
+  // zoomed out enough to see the whole thing, then let the user zoom in.
+  var containerWidth = container.clientWidth || 1000;
+  var fitScale = Math.min(
+    (containerWidth - 40) / (width + 110),
+    (viewportHeight - 40) / (height + 70),
+    1
+  );
+
+  var zoom = d3.zoom().on("zoom", function (event) {
+    zoomLayer.attr("transform", event.transform);
+  });
+  svg.call(zoom);
+  svg.call(
+    zoom.transform,
+    d3.zoomIdentity.translate(20, 20).scale(Math.max(fitScale, 0.03))
+  );
 
   var modules = Array.from(
     new Set(

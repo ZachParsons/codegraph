@@ -74,7 +74,8 @@ defmodule Mix.Tasks.Codegraph.Serve do
       live_view: [signing_salt: Base.encode64(:crypto.strong_rand_bytes(8))],
       pubsub_server: Codegraph.Web.PubSub,
       check_origin: false,
-      adapter: Bandit.PhoenixAdapter
+      adapter: Bandit.PhoenixAdapter,
+      render_errors: [formats: [html: Codegraph.Web.ErrorHTML], layout: false]
     )
 
     children = [
