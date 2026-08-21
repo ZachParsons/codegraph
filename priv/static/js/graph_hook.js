@@ -265,78 +265,151 @@ function cgRenderGraph(container, data) {
     visitForTree(id, undefined); // any node not reached from a layer-0 root becomes its own root
   });
 
+  // Real Reingold-Tilford, via contour merging — replaces an earlier
+  // "reserve each subtree's total width" version that was verified
+  // wasteful: it reserves enough width for a subtree's WIDEST descendant
+  // layer and gives that same full width to every ancestor above it, so
+  // a chain that's narrow everywhere except one deep fan-out ends up with
+  // huge empty margins around every narrow node in that chain (confirmed
+  // against real Broadway data — up to 4x a node's own label width, and
+  // some layers had 2-3x more empty span than actual content).
+  //
+  // Contour merging fixes this by comparing, layer by layer, the RIGHT
+  // silhouette of everything already placed against the LEFT silhouette
+  // of the next subtree, and shifting the new subtree only as far right
+  // as the tightest shared layer actually requires — not by its total
+  // width. Two subtrees that are both narrow at some deep layer can
+  // interleave closely there even if one of them is wide higher up.
+  //
+  // Contours are keyed by ABSOLUTE layer number (nodeLayer[id]), not by
+  // depth-relative-to-this-subtree's-own-root — an earlier version of
+  // this used relative depth and was verified to still produce real
+  // overlaps (up to 105px, on real data): sugiyama layering can skip
+  // layers along a single tree edge (a child isn't guaranteed to be
+  // exactly parent-layer+1, only >), and separate root subtrees (a node
+  // never reached from a layer-0 root becomes its own root, whatever
+  // layer it's actually at) don't all start at layer 0 either — so
+  // "relative depth 0 vs relative depth 0" was comparing nodes that
+  // often weren't even at the same visual row, missing real collisions
+  // at their true shared layers. Plain objects (not arrays) hold the
+  // per-layer values so gaps don't need explicit padding.
   var TREE_GAP = 24;
-  var subtreeWidth = {};
-  function computeSubtreeWidth(id) {
-    if (subtreeWidth[id] !== undefined) return subtreeWidth[id];
-    var ownWidth = cgLabelWidth(nodesById[id]) + TREE_GAP;
-    var kids = treeChildrenOf[id];
-    subtreeWidth[id] = kids
-      ? Math.max(
-          ownWidth,
-          kids.reduce(function (sum, k) {
-            return sum + computeSubtreeWidth(k);
-          }, 0)
-        )
-      : ownWidth;
-    return subtreeWidth[id];
-  }
-  treeRoots.forEach(computeSubtreeWidth);
 
-  // Top-down: each node gets a horizontal slot sized by its subtree width
-  // (computed above), and splits that slot among its own children in call
-  // order — a child never spills into a sibling's reserved space, so this
-  // can't overlap regardless of how many siblings a layer has. The
-  // parent's own x is the midpoint of its first and last child's actual
-  // position (not just the slot's midpoint, in case its own label was
-  // wider than its children's combined width and the slot has leftover
-  // room) — a childless node just takes the center of its own slot.
-  function layoutSubtree(id, startX) {
+  function layoutSubtreeContour(id) {
+    var ownHalf = cgLabelWidth(nodesById[id]) / 2;
+    var myLayer = nodeLayer[id];
     var kids = treeChildrenOf[id];
+
     if (!kids) {
-      pos[id].x = startX + subtreeWidth[id] / 2;
-      return;
+      var leafRelX = {};
+      leafRelX[id] = 0;
+      var leafLeft = {};
+      var leafRight = {};
+      leafLeft[myLayer] = -ownHalf;
+      leafRight[myLayer] = ownHalf;
+      return { leftContour: leafLeft, rightContour: leafRight, relX: leafRelX };
     }
-    var cursor = startX;
-    kids.forEach(function (k) {
-      layoutSubtree(k, cursor);
-      cursor += subtreeWidth[k];
+
+    var childLayouts = kids.map(layoutSubtreeContour);
+
+    // Place children left to right: each new child is shifted just far
+    // enough right that, at every ABSOLUTE layer where it and everything
+    // already placed both have a contour, they're at least TREE_GAP apart.
+    var offsets = new Array(childLayouts.length);
+    var combinedLeft = {};
+    var combinedRight = {};
+    childLayouts.forEach(function (cl, i) {
+      var shift = 0;
+      if (i > 0) {
+        Object.keys(cl.leftContour).forEach(function (layer) {
+          if (!combinedRight.hasOwnProperty(layer)) return;
+          var needed = combinedRight[layer] + TREE_GAP - cl.leftContour[layer];
+          if (needed > shift) shift = needed;
+        });
+      }
+      offsets[i] = shift;
+      Object.keys(cl.leftContour).forEach(function (layer) {
+        var lv = cl.leftContour[layer] + shift;
+        var rv = cl.rightContour[layer] + shift;
+        if (combinedLeft.hasOwnProperty(layer)) {
+          if (lv < combinedLeft[layer]) combinedLeft[layer] = lv;
+          if (rv > combinedRight[layer]) combinedRight[layer] = rv;
+        } else {
+          combinedLeft[layer] = lv;
+          combinedRight[layer] = rv;
+        }
+      });
     });
-    pos[id].x = (pos[kids[0]].x + pos[kids[kids.length - 1]].x) / 2;
+
+    var relX = {};
+    childLayouts.forEach(function (cl, i) {
+      Object.keys(cl.relX).forEach(function (nid) {
+        relX[nid] = cl.relX[nid] + offsets[i];
+      });
+    });
+
+    // Center this node over its first and last direct child's actual
+    // (now-placed) position, same centering rule as before.
+    var firstKidX = relX[kids[0]];
+    var lastKidX = relX[kids[kids.length - 1]];
+    var nodeX = (firstKidX + lastKidX) / 2;
+
+    // Re-center everything so `id` itself sits at relative x 0 — keeps
+    // this function's contract consistent regardless of nesting depth,
+    // so a caller merging this subtree in as someone else's child can
+    // always treat offset 0 as "exactly where the node itself belongs".
+    relX[id] = 0;
+    Object.keys(relX).forEach(function (nid) {
+      if (nid !== id) relX[nid] -= nodeX;
+    });
+
+    var leftContour = {};
+    var rightContour = {};
+    leftContour[myLayer] = -ownHalf;
+    rightContour[myLayer] = ownHalf;
+    Object.keys(combinedLeft).forEach(function (layer) {
+      leftContour[layer] = combinedLeft[layer] - nodeX;
+      rightContour[layer] = combinedRight[layer] - nodeX;
+    });
+
+    return { leftContour: leftContour, rightContour: rightContour, relX: relX };
   }
-  var rootCursor = 0;
-  treeRoots.forEach(function (id) {
-    layoutSubtree(id, rootCursor);
-    rootCursor += subtreeWidth[id];
+
+  // Same contour-merge logic applies one level up, to place the separate
+  // root subtrees (Broadway's own several functions, say) against each
+  // other — an imaginary shared parent isn't needed, just the same
+  // left-to-right contour comparison used for siblings above.
+  var rootLayouts = treeRoots.map(layoutSubtreeContour);
+  var rootOffsets = new Array(rootLayouts.length);
+  var rootCombinedLeft = {};
+  var rootCombinedRight = {};
+  rootLayouts.forEach(function (rl, i) {
+    var shift = 0;
+    if (i > 0) {
+      Object.keys(rl.leftContour).forEach(function (layer) {
+        if (!rootCombinedRight.hasOwnProperty(layer)) return;
+        var needed = rootCombinedRight[layer] + TREE_GAP - rl.leftContour[layer];
+        if (needed > shift) shift = needed;
+      });
+    }
+    rootOffsets[i] = shift;
+    Object.keys(rl.leftContour).forEach(function (layer) {
+      var lv = rl.leftContour[layer] + shift;
+      var rv = rl.rightContour[layer] + shift;
+      if (rootCombinedLeft.hasOwnProperty(layer)) {
+        if (lv < rootCombinedLeft[layer]) rootCombinedLeft[layer] = lv;
+        if (rv > rootCombinedRight[layer]) rootCombinedRight[layer] = rv;
+      } else {
+        rootCombinedLeft[layer] = lv;
+        rootCombinedRight[layer] = rv;
+      }
+    });
   });
 
-  // Safety net: reserving each subtree's TOTAL width guarantees no
-  // overlap between direct siblings (same parent) or between separate
-  // root subtrees as a whole, but not between nodes from DIFFERENTLY
-  // SHAPED subtrees that happen to land in the same layer several levels
-  // down — e.g. one branch is wide near the top and narrow deeper down,
-  // an adjacent branch is the opposite, and their deep, narrow layers
-  // drift into each other even though neither subtree's total reserved
-  // width was violated. A full Reingold-Tilford layout avoids this with
-  // per-layer "contour" comparisons while building the tree; this instead
-  // catches it after the fact with one small pass, nudging only nodes
-  // that actually collide (verified against real data: 6 such pairs out
-  // of 331 nodes, a few px to ~25px each) rather than repositioning
-  // everything the way the earlier (and wrong) sweep-based approach did.
-  var byLayerForOverlap = {};
-  Object.keys(pos).forEach(function (id) {
-    (byLayerForOverlap[nodeLayer[id]] = byLayerForOverlap[nodeLayer[id]] || []).push(id);
-  });
-  Object.keys(byLayerForOverlap).forEach(function (layer) {
-    var ids = byLayerForOverlap[layer].slice().sort(function (a, b) {
-      return pos[a].x - pos[b].x;
-    });
-    var prevRight = -Infinity;
-    ids.forEach(function (id) {
-      var half = cgLabelWidth(nodesById[id]) / 2;
-      var minX = prevRight + half + TREE_GAP;
-      if (pos[id].x < minX) pos[id].x = minX;
-      prevRight = pos[id].x + half;
+  treeRoots.forEach(function (id, i) {
+    var rl = rootLayouts[i];
+    Object.keys(rl.relX).forEach(function (nid) {
+      pos[nid].x = rl.relX[nid] + rootOffsets[i];
     });
   });
 
@@ -500,25 +573,18 @@ function cgRenderGraph(container, data) {
 
   var collapsed = {};
 
-  // Smooth top-to-bottom curves (the classic tree-diagram look), not
-  // straight lines — d3-dag's own precomputed multi-point paths aren't
-  // usable here since dragging/overlap-resolution move nodes independently
-  // of the original static layout, so edges are recomputed live from
-  // current positions on every redraw.
-  var linkGen = d3
-    .linkVertical()
-    .x(function (d) {
-      return d.x;
-    })
-    .y(function (d) {
-      return d.y;
-    });
-
+  // Plain straight lines, not d3.linkVertical()'s curves — tried the
+  // curved version first, but it didn't earn its complexity over just
+  // drawing directly from node to node. d3-dag's own precomputed multi-
+  // point paths aren't usable regardless, straight or curved: dragging
+  // and the tidy-tree layout above move nodes independently of the
+  // original static sugiyama positions, so edges are recomputed live
+  // from current positions on every redraw.
   function edgePathD(fromId, toId) {
     var a = pos[fromId],
       b = pos[toId];
     if (!a || !b) return "";
-    return linkGen({ source: a, target: b });
+    return "M" + a.x + "," + a.y + "L" + b.x + "," + b.y;
   }
 
   var edgePaths = edgeLayer
