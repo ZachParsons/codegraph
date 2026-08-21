@@ -77,8 +77,28 @@ defmodule Codegraph.Analyzer do
   @spec analyze_source(String.t(), String.t()) :: Graph.t()
   def analyze_source(source, file \\ "nofile") when is_binary(source) do
     quoted = Code.string_to_quoted!(source, file: file)
-    acc = walk(quoted, %{module: nil, function: nil}, %{nodes: MapSet.new(), edges: MapSet.new()})
-    %Graph{nodes: MapSet.to_list(acc.nodes), edges: MapSet.to_list(acc.edges)}
+
+    acc =
+      walk(quoted, %{module: nil, function: nil}, %{
+        nodes: MapSet.new(),
+        edges: MapSet.new(),
+        specs: %{}
+      })
+
+    # @spec can appear before or after the def it describes, so specs are
+    # collected separately during the walk and attached to their matching
+    # node here, once the whole file (and thus every @spec) has been seen.
+    nodes =
+      acc.nodes
+      |> MapSet.to_list()
+      |> Enum.map(fn node ->
+        case Map.get(acc.specs, {node.module, node.function, node.arity}) do
+          nil -> node
+          spec -> %{node | spec_args: spec.args, spec_return: spec.return}
+        end
+      end)
+
+    %Graph{nodes: nodes, edges: MapSet.to_list(acc.edges)}
   end
 
   @doc "Analyze a file on disk into a `Codegraph.Graph`."
@@ -104,11 +124,23 @@ defmodule Codegraph.Analyzer do
       arity: arity,
       external: false,
       status: :unchanged,
-      hash: :erlang.phash2(body)
+      hash: :erlang.phash2(body),
+      params: fun_params(head)
     }
 
     acc = add_node(acc, node)
     walk(body, %{ctx | function: {name, arity}}, acc)
+  end
+
+  # -- @spec: record the type signature, keyed by module/name/arity, to be
+  # attached to its matching node after the whole file has been walked
+  # (a @spec can be written above or below the def it describes) --
+  defp walk({:@, _, [{:spec, _, [{:"::", _, [head, return_type]}]}]}, ctx, acc)
+       when not is_nil(ctx.module) do
+    {name, arg_types} = spec_head(head)
+    key = {ctx.module, name, length(arg_types)}
+    spec = %{args: Enum.map(arg_types, &Macro.to_string/1), return: Macro.to_string(return_type)}
+    %{acc | specs: Map.put(acc.specs, key, spec)}
   end
 
   # -- pipe: rhs's arity gets +1 for the piped-in lhs argument --
@@ -171,6 +203,25 @@ defmodule Codegraph.Analyzer do
 
   defp fun_head({name, _, args}) when is_atom(name) do
     {name, if(is_list(args), do: length(args), else: 0)}
+  end
+
+  # Readable text for each parameter, straight from the def head's own
+  # patterns — handles plain vars, defaults, and destructuring patterns
+  # alike via Macro.to_string/1, rather than hand-writing a pattern-to-
+  # string pretty-printer for each AST shape Elixir allows there.
+  defp fun_params({:when, _, [inner, _guard]}), do: fun_params(inner)
+
+  defp fun_params({_name, _, args}) do
+    args |> List.wrap() |> Enum.map(&Macro.to_string/1)
+  end
+
+  # Same idea as fun_head/1, but keeps the raw (type) argument ASTs
+  # instead of just their count, since @spec callers need to stringify
+  # each one.
+  defp spec_head({:when, _, [inner, _guard]}), do: spec_head(inner)
+
+  defp spec_head({name, _, args}) when is_atom(name) do
+    {name, List.wrap(args)}
   end
 
   defp resolve_alias({:__aliases__, _, parts}, nil), do: Module.concat(parts)

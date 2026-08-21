@@ -71,4 +71,54 @@ defmodule Codegraph.AnalyzerTest do
 
     refute Enum.any?(graph.edges, fn e -> e.to.function == :if end)
   end
+
+  test "captures parameter names from the def head" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        def handle(message, %{status: status} = state), do: {message, status, state}
+        def zero, do: :ok
+      end
+      """)
+
+    handle = Enum.find(graph.nodes, &(&1.function == :handle))
+    assert handle.params == ["message", "%{status: status} = state"]
+
+    zero = Enum.find(graph.nodes, &(&1.function == :zero))
+    assert zero.params == []
+  end
+
+  test "attaches a @spec to its matching function regardless of source order" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        @spec before_def(integer()) :: boolean()
+        def before_def(x), do: x > 0
+
+        def after_def(x), do: x
+        @spec after_def(String.t()) :: :ok
+      end
+      """)
+
+    before_def = Enum.find(graph.nodes, &(&1.function == :before_def))
+    assert before_def.spec_args == ["integer()"]
+    assert before_def.spec_return == "boolean()"
+
+    after_def = Enum.find(graph.nodes, &(&1.function == :after_def))
+    assert after_def.spec_args == ["String.t()"]
+    assert after_def.spec_return == ":ok"
+  end
+
+  test "functions without a @spec have nil spec fields" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        def unspecced(x), do: x
+      end
+      """)
+
+    node = Enum.find(graph.nodes, &(&1.function == :unspecced))
+    assert node.spec_args == nil
+    assert node.spec_return == nil
+  end
 end

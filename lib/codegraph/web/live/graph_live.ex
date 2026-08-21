@@ -73,7 +73,16 @@ defmodule Codegraph.Web.GraphLive do
   end
 
   defp node_json(n) do
-    %{module: inspect(n.module), function: n.function, arity: n.arity, external: n.external, status: n.status}
+    %{
+      module: inspect(n.module),
+      function: n.function,
+      arity: n.arity,
+      external: n.external,
+      status: n.status,
+      params: n.params,
+      spec_args: n.spec_args,
+      spec_return: n.spec_return
+    }
   end
 
   defp edge_json(e) do

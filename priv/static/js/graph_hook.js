@@ -4,6 +4,22 @@ function cgNodeId(n) {
   return n.function ? n.module + "." + n.function + "/" + n.arity : n.module;
 }
 
+// Parameter names always come from the def head itself. @spec is optional
+// idiomatic Elixir (no mandatory static types), so most functions won't
+// have one — those just get the plain signature line, no @spec line.
+function cgTooltip(id, info) {
+  var lines = [id];
+  if (info.params) {
+    lines.push(info.function + "(" + info.params.join(", ") + ")");
+  }
+  if (info.spec_args && info.spec_return) {
+    lines.push("@spec " + info.function + "(" + info.spec_args.join(", ") + ") :: " + info.spec_return);
+  } else if (info.external) {
+    lines.push("(external — not analyzed)");
+  }
+  return lines.join("\n");
+}
+
 var CG_STATUS_COLOR = {
   added: "#3fb950",
   removed: "#f85149",
@@ -383,7 +399,7 @@ function cgRenderGraph(container, data) {
     });
 
   nodeG.append("title").text(function (id) {
-    return id;
+    return cgTooltip(id, nodesById[id]);
   });
 
   function redraw() {
