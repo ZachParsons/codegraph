@@ -84,7 +84,7 @@ defmodule Codegraph.Analyzer do
     acc =
       walk(quoted, %{module: nil, function: nil, aliases: %{}}, %{
         nodes: MapSet.new(),
-        edges: MapSet.new(),
+        edges: [],
         specs: %{}
       })
 
@@ -101,7 +101,13 @@ defmodule Codegraph.Analyzer do
         end
       end)
 
-    %Graph{nodes: nodes, edges: MapSet.to_list(acc.edges)}
+    # Edges accumulate by prepending (see add_edge/2), so this reverses
+    # back to call order before deduping — Enum.uniq/1 keeps each
+    # element's FIRST occurrence, which after the reverse is its first
+    # appearance in the source, not its last.
+    edges = acc.edges |> Enum.reverse() |> Enum.uniq()
+
+    %Graph{nodes: nodes, edges: edges}
   end
 
   @doc "Analyze a file on disk into a `Codegraph.Graph`."
@@ -317,5 +323,5 @@ defmodule Codegraph.Analyzer do
   defp maybe_add_edge(acc, _ctx_without_function, _target_mod, _fun, _arity), do: acc
 
   defp add_node(acc, node), do: %{acc | nodes: MapSet.put(acc.nodes, node)}
-  defp add_edge(acc, edge), do: %{acc | edges: MapSet.put(acc.edges, edge)}
+  defp add_edge(acc, edge), do: %{acc | edges: [edge | acc.edges]}
 end

@@ -122,6 +122,30 @@ defmodule Codegraph.AnalyzerTest do
     assert node.spec_return == nil
   end
 
+  test "edges preserve call order" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        def a(x) do
+          third(x)
+          first(x)
+          second(x)
+        end
+
+        def first(x), do: x
+        def second(x), do: x
+        def third(x), do: x
+      end
+      """)
+
+    order =
+      graph.edges
+      |> Enum.filter(&(&1.from.function == :a))
+      |> Enum.map(& &1.to.function)
+
+    assert order == [:third, :first, :second]
+  end
+
   test "resolves calls through a plain alias" do
     graph =
       Analyzer.analyze_source("""

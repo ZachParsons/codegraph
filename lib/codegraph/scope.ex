@@ -74,6 +74,12 @@ defmodule Codegraph.Scope do
   @doc """
   BFS from `roots` (a list of module atoms) out to `depth` hops
   (non-negative integer, or `:infinity` for the full transitive closure).
+
+  Preserves call order (the order edges were found in the source, already
+  preserved through `project_graph/2`'s merge) in the returned edges/nodes,
+  rather than the unspecified order a MapSet would give — this is what
+  lets the UI lay out sibling nodes left-to-right in call order instead of
+  an arbitrary one.
   """
   @spec scope(Graph.t(), [module()], non_neg_integer() | :infinity) :: Graph.t()
   def scope(%Graph{} = graph, roots, depth \\ 2) do
@@ -82,55 +88,53 @@ defmodule Codegraph.Scope do
     edges_by_from =
       Enum.group_by(graph.edges, fn e -> {e.from.module, e.from.function, e.from.arity} end)
 
-    start =
-      graph.nodes
-      |> Enum.filter(fn n -> n.function != nil and MapSet.member?(roots, n.module) end)
-      |> MapSet.new()
+    start = Enum.filter(graph.nodes, fn n -> n.function != nil and MapSet.member?(roots, n.module) end)
 
-    {visited_nodes, visited_edges} = bfs(MapSet.to_list(start), edges_by_from, depth, start, MapSet.new())
+    acc = %{node_set: MapSet.new(start), node_list: start, edge_set: MapSet.new(), edge_list: []}
+    acc = bfs(start, edges_by_from, depth, acc)
 
     module_nodes =
       Enum.filter(graph.nodes, fn n -> is_nil(n.function) and MapSet.member?(roots, n.module) end)
 
     %Graph{
-      nodes: Enum.uniq(MapSet.to_list(visited_nodes) ++ module_nodes),
-      edges: MapSet.to_list(visited_edges)
+      nodes: Enum.uniq(acc.node_list ++ module_nodes),
+      edges: acc.edge_list
     }
   end
 
-  defp bfs(_frontier, _edges_by_from, depth, visited_nodes, visited_edges) when depth < 0 do
-    {visited_nodes, visited_edges}
-  end
+  defp bfs(_frontier, _edges_by_from, depth, acc) when depth < 0, do: acc
+  defp bfs([], _edges_by_from, _depth, acc), do: acc
+  defp bfs(_frontier, _edges_by_from, 0, acc), do: acc
 
-  defp bfs([], _edges_by_from, _depth, visited_nodes, visited_edges) do
-    {visited_nodes, visited_edges}
-  end
-
-  defp bfs(_frontier, _edges_by_from, 0, visited_nodes, visited_edges) do
-    {visited_nodes, visited_edges}
-  end
-
-  defp bfs(frontier, edges_by_from, depth, visited_nodes, visited_edges) do
+  defp bfs(frontier, edges_by_from, depth, acc) do
     new_edges =
       frontier
       |> Enum.flat_map(fn n -> Map.get(edges_by_from, {n.module, n.function, n.arity}, []) end)
       |> Enum.uniq()
-      |> Enum.reject(&MapSet.member?(visited_edges, &1))
+      |> Enum.reject(&MapSet.member?(acc.edge_set, &1))
 
-    visited_edges = Enum.reduce(new_edges, visited_edges, &MapSet.put(&2, &1))
+    acc = %{
+      acc
+      | edge_set: Enum.reduce(new_edges, acc.edge_set, &MapSet.put(&2, &1)),
+        edge_list: acc.edge_list ++ new_edges
+    }
 
     new_nodes =
       new_edges
       |> Enum.map(& &1.to)
       |> Enum.uniq()
-      |> Enum.reject(&MapSet.member?(visited_nodes, &1))
+      |> Enum.reject(&MapSet.member?(acc.node_set, &1))
 
-    visited_nodes = Enum.reduce(new_nodes, visited_nodes, &MapSet.put(&2, &1))
+    acc = %{
+      acc
+      | node_set: Enum.reduce(new_nodes, acc.node_set, &MapSet.put(&2, &1)),
+        node_list: acc.node_list ++ new_nodes
+    }
 
     next_frontier = Enum.reject(new_nodes, & &1.external)
     next_depth = if depth == :infinity, do: :infinity, else: depth - 1
 
-    bfs(next_frontier, edges_by_from, next_depth, visited_nodes, visited_edges)
+    bfs(next_frontier, edges_by_from, next_depth, acc)
   end
 
   defp resolve_edge(%Edge{} = edge, defined_functions) do

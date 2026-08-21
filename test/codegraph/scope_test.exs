@@ -30,4 +30,34 @@ defmodule Codegraph.ScopeTest do
     depth2 = Scope.scope(graph, [A], 2)
     assert Enum.any?(depth2.nodes, &(&1.module == C and &1.function == :deep))
   end
+
+  test "scope preserves call order through the BFS, not just at the analyzer" do
+    dir = Path.join(System.tmp_dir!(), "codegraph_scope_order_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    File.write!(Path.join(dir, "root.ex"), """
+    defmodule Root do
+      def entry(x) do
+        third(x)
+        first(x)
+        second(x)
+      end
+
+      def first(x), do: x
+      def second(x), do: x
+      def third(x), do: x
+    end
+    """)
+
+    graph = Scope.project_graph(["*.ex"], dir)
+    scoped = Scope.scope(graph, [Root], 1)
+
+    order =
+      scoped.edges
+      |> Enum.filter(&(&1.from.function == :entry))
+      |> Enum.map(& &1.to.function)
+
+    assert order == [:third, :first, :second]
+  end
 end
