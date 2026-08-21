@@ -19,9 +19,10 @@ function cgSpecType(specArg) {
 // Node color alone doesn't reliably identify a module: the palette
 // (d3.schemeTableau10) only has 10 distinct colors, and any scope with
 // more than 10 modules — which is most real ones — has to reuse colors,
-// so two different modules can land on the same one. Prefixing every
-// label with the module's last name segment makes it unambiguous by
-// text, regardless of how many modules or how the palette recycles.
+// so two different modules can land on the same one. The module name is
+// shown as its own small line above the signature (see the node text
+// rendering below) rather than prefixed onto the function name itself,
+// which made that line too long.
 function cgModuleShort(mod) {
   var parts = mod.split(".");
   return parts[parts.length - 1];
@@ -35,9 +36,7 @@ function cgModuleShort(mod) {
 // see nodeSize below, which sizes each node's slot from these same lines
 // rather than a fixed guess.
 function cgLabelLines(info) {
-  var modPrefix = cgModuleShort(info.module) + ".";
-
-  if (!info.params) return [modPrefix + info.function + "/" + info.arity];
+  if (!info.params) return [info.function + "/" + info.arity];
 
   var paramList = info.params
     .map(function (p, i) {
@@ -46,7 +45,7 @@ function cgLabelLines(info) {
     })
     .join(", ");
 
-  var lines = [cgTruncate(modPrefix + info.function + "(" + paramList + ")", 64)];
+  var lines = [cgTruncate(info.function + "(" + paramList + ")", 64)];
   if (info.spec_return) lines.push(cgTruncate(":: " + info.spec_return, 64));
   return lines;
 }
@@ -54,7 +53,7 @@ function cgLabelLines(info) {
 var CG_CHAR_WIDTH = 6.6; // approx px/char for the 11px ui-monospace label font
 
 function cgLabelWidth(info) {
-  var lines = cgLabelLines(info);
+  var lines = cgLabelLines(info).concat([cgModuleShort(info.module)]);
   var maxLen = lines.reduce(function (m, l) {
     return Math.max(m, l.length);
   }, 0);
@@ -431,10 +430,12 @@ function cgRenderGraph(container, data) {
       return nodesById[id].external ? 0.55 : 1;
     });
 
-  // Multi-line label (signature line, plus a return-type line when a
-  // @spec provides one) via tspans — a plain .text() can't hold a line
-  // break, and these are shown directly on the graph now, not tucked
-  // behind a hover.
+  // Multi-line label via tspans (a plain .text() can't hold a line
+  // break): a small module-name line first — its own tspan with its own
+  // smaller size and module color, so it doesn't lengthen the signature
+  // line itself — then the signature, then a return-type line when a
+  // @spec provides one. All shown directly on the graph, not behind a
+  // hover.
   nodeG
     .append("text")
     .attr("font-family", "ui-monospace, monospace")
@@ -445,13 +446,22 @@ function cgRenderGraph(container, data) {
       return CG_STATUS_COLOR[info.status] || "#eee";
     })
     .each(function (id) {
-      var lines = cgLabelLines(nodesById[id]);
+      var info = nodesById[id];
       var text = d3.select(this);
-      lines.forEach(function (line, i) {
+
+      text
+        .append("tspan")
+        .attr("x", 11)
+        .attr("dy", -3)
+        .attr("font-size", 9)
+        .attr("fill", info.external ? "#666" : color(info.module))
+        .text(cgModuleShort(info.module));
+
+      cgLabelLines(info).forEach(function (line, i) {
         text
           .append("tspan")
           .attr("x", 11)
-          .attr("dy", i === 0 ? 4 : 12)
+          .attr("dy", i === 0 ? 13 : 12)
           .text(line);
       });
     });
