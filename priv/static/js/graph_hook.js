@@ -68,8 +68,20 @@ var CG_STATUS_COLOR = {
 
 var CG_BADGE_GAP = 34; // vertical gap between a module's badge and its topmost node
 
+// Escape clears both node selection and any active browser text
+// selection. Tracked at module scope (not just inside cgRenderGraph) so a
+// re-render (filter change, diff reload, etc.) can remove the PREVIOUS
+// render's listener before adding a new one — otherwise every re-render
+// would leak another document-level listener, each holding a closure
+// over that render's now-stale selectedIds/updateSelectionHighlight.
+var cgEscListener = null;
+
 function cgRenderGraph(container, data) {
   container.innerHTML = "";
+  if (cgEscListener) {
+    document.removeEventListener("keydown", cgEscListener);
+    cgEscListener = null;
+  }
   if (!data.nodes.length) {
     container.innerHTML =
       '<p style="opacity:0.6; padding: 1rem;">No nodes in scope.</p>';
@@ -83,7 +95,7 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
-    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time · click a label to collapse</span>';
+    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
 
@@ -458,6 +470,22 @@ function cgRenderGraph(container, data) {
   function updateSelectionHighlight() {
     nodeG.select("circle").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
   }
+
+  // Escape clears node selection and any active text selection (from
+  // click-dragging over a label — see the cursor/text-selection work
+  // earlier). Fires regardless of focus, since this has no dedicated
+  // input to blur out of other than the filter box, which handles its
+  // own Escape natively (clearing focus, not text) without conflict.
+  cgEscListener = function (event) {
+    if (event.key !== "Escape") return;
+    if (selectedIds.size) {
+      selectedIds.clear();
+      updateSelectionHighlight();
+    }
+    var sel = window.getSelection && window.getSelection();
+    if (sel) sel.removeAllRanges();
+  };
+  document.addEventListener("keydown", cgEscListener);
 
   var nodeG = nodeLayer
     .selectAll("g")
