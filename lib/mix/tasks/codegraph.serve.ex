@@ -3,10 +3,14 @@ defmodule Mix.Tasks.Codegraph.Serve do
   @moduledoc """
   Starts the codegraph web UI against the current project.
 
-      mix codegraph.serve [--port 4444]
+      mix codegraph.serve [--port 4444] [--path lib] \\
+        [--root MyApp.Accounts] [--root MyApp.Billing] [--depth 2]
 
-  Analysis flags (--root, --depth, --diff) land here once the analyzer
-  engine exists; for now this only boots the empty LiveView shell.
+  `--root` may be given multiple times to seed the BFS from several
+  modules; omit it to render the whole project graph unscoped. `--depth`
+  accepts an integer or `infinity`. `--path` is the directory to scan for
+  `.ex` files (relative to the current project root); defaults to `lib`.
+  Diff flags (`--diff`) land once the diff analyzer exists.
   """
   use Mix.Task
 
@@ -14,8 +18,31 @@ defmodule Mix.Tasks.Codegraph.Serve do
   def run(args) do
     Mix.Task.run("app.start")
 
-    {opts, _rest, _invalid} = OptionParser.parse(args, strict: [port: :integer])
+    {opts, _rest, _invalid} =
+      OptionParser.parse(args,
+        strict: [port: :integer, path: :string, root: :keep, depth: :string]
+      )
+
     port = Keyword.get(opts, :port, 4444)
+    path = Keyword.get(opts, :path, "lib")
+
+    roots =
+      opts
+      |> Keyword.get_values(:root)
+      |> Enum.map(&Module.concat([&1]))
+
+    depth =
+      case Keyword.get(opts, :depth, "2") do
+        "infinity" -> :infinity
+        n -> String.to_integer(n)
+      end
+
+    Application.put_env(:codegraph, :cli_opts,
+      globs: [Path.join(path, "**/*.ex")],
+      cwd: File.cwd!(),
+      roots: roots,
+      depth: depth
+    )
 
     Application.put_env(:codegraph, Codegraph.Web.Endpoint,
       http: [ip: {127, 0, 0, 1}, port: port],
