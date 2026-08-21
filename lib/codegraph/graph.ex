@@ -7,14 +7,15 @@ defmodule Codegraph.Graph do
 
   defmodule Node do
     @moduledoc "A function node, or the module it belongs to (`function: nil`)."
-    defstruct [:module, :function, :arity, :external, :status]
+    defstruct [:module, :function, :arity, :external, :status, :hash]
 
     @type t :: %__MODULE__{
             module: module() | String.t(),
             function: atom() | nil,
             arity: non_neg_integer() | nil,
             external: boolean(),
-            status: :added | :removed | :modified | :unchanged
+            status: :added | :removed | :modified | :unchanged,
+            hash: integer() | nil
           }
   end
 

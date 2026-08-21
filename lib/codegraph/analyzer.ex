@@ -96,7 +96,17 @@ defmodule Codegraph.Analyzer do
   # -- def/defp: register the function, descend with new function context --
   defp walk({kind, _, [head, [do: body]]}, ctx, acc) when kind in [:def, :defp] and not is_nil(ctx.module) do
     {name, arity} = fun_head(head)
-    acc = add_node(acc, %Node{module: ctx.module, function: name, arity: arity, external: false, status: :unchanged})
+
+    node = %Node{
+      module: ctx.module,
+      function: name,
+      arity: arity,
+      external: false,
+      status: :unchanged,
+      hash: :erlang.phash2(body)
+    }
+
+    acc = add_node(acc, node)
     walk(body, %{ctx | function: {name, arity}}, acc)
   end
 
