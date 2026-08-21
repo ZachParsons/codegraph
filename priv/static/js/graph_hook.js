@@ -296,11 +296,7 @@ function cgRenderGraph(container, data) {
   var edgeLayer = root.append("g");
   var nodeLayer = root.append("g");
 
-  var clusters = clusterLayer
-    .selectAll("g")
-    .data(modules)
-    .join("g")
-    .style("cursor", "grab");
+  var clusters = clusterLayer.selectAll("g").data(modules).join("g");
 
   clusters
     .append("rect")
@@ -311,7 +307,8 @@ function cgRenderGraph(container, data) {
     .attr("stroke", function (mod) {
       return color(mod);
     })
-    .attr("stroke-width", 1.2);
+    .attr("stroke-width", 1.2)
+    .style("cursor", "grab");
 
   clusters
     .append("text")
@@ -322,7 +319,7 @@ function cgRenderGraph(container, data) {
     })
     .attr("font-size", 11)
     .attr("font-family", "ui-monospace, monospace")
-    .style("cursor", "pointer")
+    .style("cursor", "text")
     .text(function (mod) {
       return mod;
     })
@@ -408,8 +405,7 @@ function cgRenderGraph(container, data) {
     .join("g")
     .attr("data-module", function (id) {
       return nodesById[id].module;
-    })
-    .style("cursor", "grab");
+    });
 
   nodeG
     .append("circle")
@@ -428,7 +424,8 @@ function cgRenderGraph(container, data) {
     })
     .attr("opacity", function (id) {
       return nodesById[id].external ? 0.55 : 1;
-    });
+    })
+    .style("cursor", "grab");
 
   // Multi-line label via tspans (a plain .text() can't hold a line
   // break): a small module-name line first — its own tspan with its own
@@ -445,6 +442,7 @@ function cgRenderGraph(container, data) {
       if (info.external) return "#8a8a92";
       return CG_STATUS_COLOR[info.status] || "#eee";
     })
+    .style("cursor", "text")
     .each(function (id) {
       var info = nodesById[id];
       var text = d3.select(this);
