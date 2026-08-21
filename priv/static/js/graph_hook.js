@@ -10,9 +10,7 @@ var CG_STATUS_COLOR = {
   modified: "#d29922",
 };
 
-var CG_PAD_X = 70;
-var CG_PAD_Y = 24;
-var CG_PAD_GAP = 12; // minimum gap enforced between separated module boxes
+var CG_BADGE_GAP = 34; // vertical gap between a module's badge and its topmost node
 
 function cgRenderGraph(container, data) {
   container.innerHTML = "";
@@ -100,27 +98,6 @@ function cgRenderGraph(container, data) {
   var modules = Object.keys(byModuleIds);
   var color = d3.scaleOrdinal(d3.schemeTableau10).domain(modules);
 
-  function moduleBounds(mod) {
-    var ids = byModuleIds[mod];
-    var minX = Infinity,
-      maxX = -Infinity,
-      minY = Infinity,
-      maxY = -Infinity;
-    ids.forEach(function (id) {
-      var p = pos[id];
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
-    });
-    return {
-      minX: minX - CG_PAD_X,
-      maxX: maxX + CG_PAD_X,
-      minY: minY - CG_PAD_Y,
-      maxY: maxY + CG_PAD_Y,
-    };
-  }
-
   function translateModule(mod, dx, dy) {
     byModuleIds[mod].forEach(function (id) {
       pos[id].x += dx;
@@ -128,58 +105,38 @@ function cgRenderGraph(container, data) {
     });
   }
 
-  // Sugiyama has no notion of "keep same-module nodes together", so a
-  // module's nodes can end up scattered across the layout and its
-  // bounding box can overlap unrelated modules'. Resolve pairwise overlaps
-  // by pushing whole modules apart, moving every node in each module
-  // together (a cheap AABB separation pass — modules are few, even if
-  // nodes are many).
-  //
-  // Pushes are horizontal ONLY. Y is now call-depth — root at top, leaves
-  // below — and that ordering is the entire point of this layout, so it
-  // must never move to resolve a collision. Any two rectangles can always
-  // be separated by a large enough push along one fixed axis, so this
-  // still fully converges; a wide graph just ends up wider, which is
-  // consistent with a traditional (if wide) tree diagram rather than
-  // fighting it.
-  function resolveModuleOverlaps() {
-    for (var iter = 0; iter < 2000; iter++) {
-      var moved = false;
-      for (var i = 0; i < modules.length; i++) {
-        for (var j = i + 1; j < modules.length; j++) {
-          var a = moduleBounds(modules[i]);
-          var b = moduleBounds(modules[j]);
-          var overlapX = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX);
-          var overlapY = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY);
-          if (overlapX <= 0 || overlapY <= 0) continue;
-
-          moved = true;
-          var aCx = (a.minX + a.maxX) / 2,
-            bCx = (b.minX + b.maxX) / 2;
-          var pushX = overlapX / 2 + CG_PAD_GAP;
-          var dir = aCx <= bCx ? -1 : 1;
-          translateModule(modules[i], dir * pushX, 0);
-          translateModule(modules[j], -dir * pushX, 0);
-        }
-      }
-      if (!moved) break;
-    }
+  // A module's functions can end up anywhere sugiyama's crossing-
+  // minimization happens to put them — there's no notion of "keep this
+  // module's nodes together" — so drawing one bounding box around a
+  // module's full scatter routinely produces a big box around two nodes
+  // sitting far apart, mostly empty space. Module identity is already
+  // shown by node color, so instead of a box: a small floating label,
+  // anchored above whichever of the module's nodes is closest to the
+  // root (lowest y), used as the drag handle / collapse target.
+  function moduleAnchor(mod) {
+    var ids = byModuleIds[mod];
+    var top = ids[0];
+    ids.forEach(function (id) {
+      if (pos[id].y < pos[top].y) top = id;
+    });
+    return pos[top];
   }
-  resolveModuleOverlaps();
 
   function contentExtent() {
     var minX = Infinity,
       maxX = -Infinity,
       minY = Infinity,
       maxY = -Infinity;
-    modules.forEach(function (mod) {
-      var b = moduleBounds(mod);
-      if (b.minX < minX) minX = b.minX;
-      if (b.maxX > maxX) maxX = b.maxX;
-      if (b.minY < minY) minY = b.minY;
-      if (b.maxY > maxY) maxY = b.maxY;
+    Object.keys(pos).forEach(function (id) {
+      var p = pos[id];
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
     });
-    return { minX: minX, maxX: maxX + 160, minY: minY, maxY: maxY }; // +160 for node label text
+    // -90/+200 for label width, -50 to leave room for badges above the
+    // topmost nodes.
+    return { minX: minX - 90, maxX: maxX + 200, minY: minY - 50, maxY: maxY };
   }
 
   var content = contentExtent();
@@ -252,18 +209,19 @@ function cgRenderGraph(container, data) {
 
   clusters
     .append("rect")
-    .attr("rx", 12)
-    .attr("fill", function (mod) {
-      return color(mod);
-    })
-    .attr("fill-opacity", 0.08)
+    .attr("rx", 6)
+    .attr("height", 22)
+    .attr("fill", "#16161c")
+    .attr("fill-opacity", 0.92)
     .attr("stroke", function (mod) {
       return color(mod);
     })
-    .attr("stroke-opacity", 0.45);
+    .attr("stroke-width", 1.2);
 
   clusters
     .append("text")
+    .attr("x", 8)
+    .attr("y", 15)
     .attr("fill", function (mod) {
       return color(mod);
     })
@@ -271,12 +229,21 @@ function cgRenderGraph(container, data) {
     .attr("font-family", "ui-monospace, monospace")
     .style("cursor", "pointer")
     .text(function (mod) {
-      return mod + "  (click to collapse)";
+      return mod;
     })
     .on("click", function (event, mod) {
       collapsed[mod] = !collapsed[mod];
       applyFilters();
     });
+
+  var badgeWidth = {};
+  clusters.each(function (mod) {
+    var g = d3.select(this);
+    var bbox = g.select("text").node().getBBox();
+    var w = bbox.width + 16;
+    badgeWidth[mod] = w;
+    g.select("rect").attr("width", w);
+  });
 
   var collapsed = {};
 
@@ -381,15 +348,10 @@ function cgRenderGraph(container, data) {
       return edgePathD(e.fromId, e.toId);
     });
 
-    clusters.each(function (mod) {
-      var b = moduleBounds(mod);
-      var g = d3.select(this);
-      g.select("rect")
-        .attr("x", b.minX)
-        .attr("y", b.minY)
-        .attr("width", b.maxX - b.minX)
-        .attr("height", b.maxY - b.minY);
-      g.select("text").attr("x", b.minX + 10).attr("y", b.minY + 16);
+    clusters.attr("transform", function (mod) {
+      var a = moduleAnchor(mod);
+      var w = badgeWidth[mod] || 0;
+      return "translate(" + (a.x - w / 2) + "," + (a.y - CG_BADGE_GAP) + ")";
     });
   }
   redraw();
