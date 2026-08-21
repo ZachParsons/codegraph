@@ -197,12 +197,13 @@ function cgRenderGraph(container, data) {
     .append("g")
     .attr("transform", "translate(" + xOffset + "," + (70 - content.minY) + ")");
 
-  var containerWidth = container.clientWidth || 1000;
-  var fitScale = Math.min(
-    (containerWidth - 40) / (width + 110),
-    (viewportHeight - 40) / (height + 70),
-    1
-  );
+  // Fit to HEIGHT only, not min(widthRatio, heightRatio). A wide graph's
+  // widthRatio is routinely much smaller than its heightRatio, and since
+  // zoom's scale is uniform (one factor for both axes, not independent
+  // per-axis), fitting to width would scale height down by the same
+  // factor — silently undoing the level-spacing fill above. Width instead
+  // overflows and is reached by panning (drag), which already works.
+  var fitScale = Math.min((viewportHeight - 40) / (height + 70), 1);
 
   var zoom = d3.zoom().on("zoom", function (event) {
     zoomLayer.attr("transform", event.transform);
