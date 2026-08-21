@@ -7,6 +7,7 @@ defmodule Codegraph.Web.Router do
     plug :fetch_session
     plug :fetch_live_flash
     plug :put_root_layout, html: {Codegraph.Web.Layouts, :root}
+    plug :protect_from_forgery
     plug :no_store
   end
 
