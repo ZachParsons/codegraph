@@ -83,7 +83,7 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
-    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, ctrl/cmd+click to select one at a time · click a label to collapse</span>';
+    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
 
@@ -513,14 +513,16 @@ function cgRenderGraph(container, data) {
   // shift+drag-an-area, or ctrl/cmd+click below) moves every selected
   // node together; dragging any other node clears the selection first
   // and moves just that one, same as before selection existed at all.
-  // A ctrl/cmd-held drag start skips that auto-clear, since holding the
-  // modifier means the user is trying to grow/shrink the selection (via
-  // the click handler below), not replace it.
+  // A ctrl/cmd- or shift-held drag start skips that auto-clear, since
+  // holding either modifier means the user is trying to grow/shrink the
+  // selection (via the click handler below), not replace it.
   var nodeDrag = d3
     .drag()
     .on("start", function (event, id) {
       d3.select(this.parentNode).raise();
-      var modifierHeld = event.sourceEvent && (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey);
+      var modifierHeld =
+        event.sourceEvent &&
+        (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey || event.sourceEvent.shiftKey);
       if (!modifierHeld && !selectedIds.has(id)) {
         selectedIds.clear();
         updateSelectionHighlight();
@@ -541,16 +543,18 @@ function cgRenderGraph(container, data) {
   var nodeCircles = nodeG.select("circle");
   nodeCircles.call(nodeDrag);
 
-  // Ctrl/cmd+click toggles one node in or out of the selection without
-  // disturbing the rest of it — the way to build up an arbitrary
-  // multi-node selection one click at a time, as opposed to shift+drag
-  // which selects everything in a drawn area at once. A plain click (no
-  // modifier) needs no handler here: nodeDrag's "start" above already
-  // clears the selection on an unmodified click, and d3-drag still lets
-  // the browser's own click event through afterward when the gesture
-  // didn't actually move (its default clickDistance is 0).
+  // Ctrl/cmd+click OR shift+click toggles one node in or out of the
+  // selection without disturbing the rest of it — the way to build up an
+  // arbitrary multi-node selection one click at a time, as opposed to
+  // shift+drag which selects everything in a drawn area at once (shift
+  // works for both: a held-still shift+click is a zero-distance
+  // shift+drag). A plain click (no modifier) needs no handler here:
+  // nodeDrag's "start" above already clears the selection on an
+  // unmodified click, and d3-drag still lets the browser's own click
+  // event through afterward when the gesture didn't actually move (its
+  // default clickDistance is 0).
   nodeCircles.on("click", function (event, id) {
-    if (!(event.ctrlKey || event.metaKey)) return;
+    if (!(event.ctrlKey || event.metaKey || event.shiftKey)) return;
     if (selectedIds.has(id)) {
       selectedIds.delete(id);
     } else {
