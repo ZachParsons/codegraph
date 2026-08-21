@@ -27,7 +27,7 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
-    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · click a label to collapse</span>';
+    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · shift+drag to select an area · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
 
@@ -315,6 +315,28 @@ function cgRenderGraph(container, data) {
     .attr("marker-end", "url(#cg-arrow)");
 
   var nodeIds = Object.keys(pos);
+  // Rubber-band multi-select state. Selected nodes get a highlighted
+  // stroke — nodeStroke()/nodeStrokeWidth() are shared by the initial
+  // circle creation below and by updateSelectionHighlight(), so both stay
+  // in sync instead of duplicating the same status/external logic twice.
+  var selectedIds = new Set();
+
+  function nodeStroke(id) {
+    if (selectedIds.has(id)) return "#4f9dff";
+    var info = nodesById[id];
+    if (info.external) return "#777";
+    return CG_STATUS_COLOR[info.status] || "#fff";
+  }
+
+  function nodeStrokeWidth(id) {
+    if (selectedIds.has(id)) return 3;
+    return CG_STATUS_COLOR[nodesById[id].status] ? 2 : 1.3;
+  }
+
+  function updateSelectionHighlight() {
+    nodeG.select("circle").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
+  }
+
   var nodeG = nodeLayer
     .selectAll("g")
     .data(nodeIds)
@@ -334,14 +356,8 @@ function cgRenderGraph(container, data) {
       if (info.external) return "#3a3a3f";
       return CG_STATUS_COLOR[info.status] || color(info.module);
     })
-    .attr("stroke", function (id) {
-      var info = nodesById[id];
-      if (info.external) return "#777";
-      return CG_STATUS_COLOR[info.status] || "#fff";
-    })
-    .attr("stroke-width", function (id) {
-      return CG_STATUS_COLOR[nodesById[id].status] ? 2 : 1.3;
-    })
+    .attr("stroke", nodeStroke)
+    .attr("stroke-width", nodeStrokeWidth)
     .attr("stroke-dasharray", function (id) {
       return nodesById[id].status === "removed" ? "3,2" : null;
     })
@@ -402,18 +418,100 @@ function cgRenderGraph(container, data) {
   // badge (which still drags every node in that module together). No
   // module box remains to imply "drag this whole region", so with the
   // box gone the node itself is the thing you'd naturally reach for.
+  //
+  // Dragging a node that's part of the current rubber-band selection
+  // moves every selected node together; dragging any other node clears
+  // the selection first and moves just that one, same as before selection
+  // existed at all.
   var nodeDrag = d3
     .drag()
-    .on("start", function () {
+    .on("start", function (event, id) {
       d3.select(this).raise();
+      if (!selectedIds.has(id)) {
+        selectedIds.clear();
+        updateSelectionHighlight();
+      }
     })
     .on("drag", function (event, id) {
-      pos[id].x += event.dx;
-      pos[id].y += event.dy;
+      if (selectedIds.has(id) && selectedIds.size > 1) {
+        selectedIds.forEach(function (sid) {
+          pos[sid].x += event.dx;
+          pos[sid].y += event.dy;
+        });
+      } else {
+        pos[id].x += event.dx;
+        pos[id].y += event.dy;
+      }
       redraw();
     });
   nodeG.call(nodeDrag);
   clusters.call(moduleDrag);
+
+  // Rubber-band select: shift+drag on empty canvas draws a selection box;
+  // every node whose center falls inside it becomes draggable as a group
+  // (via nodeDrag above). Shift is required so this doesn't fight the
+  // existing plain-drag-to-pan behavior on the same background.
+  zoom.filter(function (event) {
+    return (!event.ctrlKey || event.type === "wheel") && !event.button && !event.shiftKey;
+  });
+
+  var selectionStart = null;
+  var selectionRectEl = null;
+
+  var selectDrag = d3
+    .drag()
+    .filter(function (event) {
+      return event.shiftKey;
+    })
+    .on("start", function (event) {
+      selectionStart = d3.pointer(event, root.node());
+      selectionRectEl = root
+        .append("rect")
+        .attr("x", selectionStart[0])
+        .attr("y", selectionStart[1])
+        .attr("width", 0)
+        .attr("height", 0)
+        .attr("fill", "#4f9dff")
+        .attr("fill-opacity", 0.12)
+        .attr("stroke", "#4f9dff")
+        .attr("stroke-width", 1)
+        .attr("pointer-events", "none");
+    })
+    .on("drag", function (event) {
+      var p = d3.pointer(event, root.node());
+      var x = Math.min(selectionStart[0], p[0]);
+      var y = Math.min(selectionStart[1], p[1]);
+      selectionRectEl
+        .attr("x", x)
+        .attr("y", y)
+        .attr("width", Math.abs(p[0] - selectionStart[0]))
+        .attr("height", Math.abs(p[1] - selectionStart[1]));
+    })
+    .on("end", function (event) {
+      var p = d3.pointer(event, root.node());
+      var x0 = Math.min(selectionStart[0], p[0]),
+        x1 = Math.max(selectionStart[0], p[0]);
+      var y0 = Math.min(selectionStart[1], p[1]),
+        y1 = Math.max(selectionStart[1], p[1]);
+
+      selectedIds.clear();
+      nodeIds.forEach(function (id) {
+        var np = pos[id];
+        if (np.x >= x0 && np.x <= x1 && np.y >= y0 && np.y <= y1) selectedIds.add(id);
+      });
+
+      selectionRectEl.remove();
+      selectionRectEl = null;
+      updateSelectionHighlight();
+    });
+  svg.call(selectDrag);
+
+  svg.on("click", function (event) {
+    if (event.target === svg.node() && selectedIds.size) {
+      selectedIds.clear();
+      updateSelectionHighlight();
+    }
+  });
 
   function applyFilters() {
     var query = (searchInput.value || "").toLowerCase();
