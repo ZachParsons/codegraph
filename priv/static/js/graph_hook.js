@@ -71,13 +71,15 @@ function cgRenderGraph(container, data) {
   });
 
   // nodeSize is [within-layer spacing, between-layer spacing]. Sugiyama
-  // lays out with y = layer depth, x = spread within a layer — for a
-  // typically shallow-but-wide call graph that means short and very wide.
-  // Swapping x/y after layout (below) rotates it 90°: layers run left to
-  // right (narrow, since depth is usually small) and same-layer nodes
-  // stack top to bottom (tall, roomy for the common case of wide fan-out).
+  // lays out with y = layer depth, x = spread within a layer — exactly a
+  // traditional top-down tree: roots at low y, leaves at high y, callers
+  // above callees. (An earlier version swapped x/y to fight a "too wide"
+  // complaint on a shallow/wide graph — reverted, since that put depth on
+  // the horizontal axis and roots off to one side instead of on top. A
+  // wide call graph is still going to be wide here; that's what a wide
+  // tree looks like. Pan/zoom is the answer, not fighting the axes.)
   var layout = d3.sugiyama().nodeSize(function () {
-    return [44, 260];
+    return [190, 80];
   });
   var extent = layout(graph);
 
@@ -86,7 +88,7 @@ function cgRenderGraph(container, data) {
   // nodes freely without needing to touch the underlying d3-dag layout.
   var pos = {};
   Array.from(graph.nodes()).forEach(function (n) {
-    pos[n.data] = { x: n.y, y: n.x }; // swapped
+    pos[n.data] = { x: n.x, y: n.y };
   });
 
   var byModuleIds = {};
@@ -126,39 +128,23 @@ function cgRenderGraph(container, data) {
     });
   }
 
-  function overallAspect() {
-    var minX = Infinity,
-      maxX = -Infinity,
-      minY = Infinity,
-      maxY = -Infinity;
-    modules.forEach(function (mod) {
-      var b = moduleBounds(mod);
-      if (b.minX < minX) minX = b.minX;
-      if (b.maxX > maxX) maxX = b.maxX;
-      if (b.minY < minY) minY = b.minY;
-      if (b.maxY > maxY) maxY = b.maxY;
-    });
-    return Math.max((maxX - minX) / Math.max(maxY - minY, 1), 0.2);
-  }
-
   // Sugiyama has no notion of "keep same-module nodes together", so a
   // module's nodes can end up scattered across the layout and its
   // bounding box can overlap unrelated modules'. Resolve pairwise overlaps
-  // by pushing whole modules apart along an axis, moving every node in
-  // each module together (a cheap AABB separation pass — modules are few,
-  // even if nodes are many).
+  // by pushing whole modules apart, moving every node in each module
+  // together (a cheap AABB separation pass — modules are few, even if
+  // nodes are many).
   //
-  // Naively always pushing along the axis of least overlap systematically
-  // favors width (module boxes are inherently wider than tall, from text-
-  // label padding alone), undoing the earlier axis-swap fix for "too wide,
-  // not tall enough". Instead the choice is biased by the CURRENT overall
-  // aspect ratio each pass — already wider than tall raises the bar for
-  // picking another X-push — which self-corrects toward a balanced result
-  // regardless of graph size, rather than needing a fixed magic constant.
+  // Pushes are horizontal ONLY. Y is now call-depth — root at top, leaves
+  // below — and that ordering is the entire point of this layout, so it
+  // must never move to resolve a collision. Any two rectangles can always
+  // be separated by a large enough push along one fixed axis, so this
+  // still fully converges; a wide graph just ends up wider, which is
+  // consistent with a traditional (if wide) tree diagram rather than
+  // fighting it.
   function resolveModuleOverlaps() {
-    for (var iter = 0; iter < 400; iter++) {
+    for (var iter = 0; iter < 2000; iter++) {
       var moved = false;
-      var aspect = overallAspect();
       for (var i = 0; i < modules.length; i++) {
         for (var j = i + 1; j < modules.length; j++) {
           var a = moduleBounds(modules[i]);
@@ -170,20 +156,10 @@ function cgRenderGraph(container, data) {
           moved = true;
           var aCx = (a.minX + a.maxX) / 2,
             bCx = (b.minX + b.maxX) / 2;
-          var aCy = (a.minY + a.maxY) / 2,
-            bCy = (b.minY + b.maxY) / 2;
-
-          if (overlapX * aspect < overlapY) {
-            var pushX = overlapX / 2 + CG_PAD_GAP;
-            var dir = aCx <= bCx ? -1 : 1;
-            translateModule(modules[i], dir * pushX, 0);
-            translateModule(modules[j], -dir * pushX, 0);
-          } else {
-            var pushY = overlapY / 2 + CG_PAD_GAP;
-            var dirY = aCy <= bCy ? -1 : 1;
-            translateModule(modules[i], 0, dirY * pushY);
-            translateModule(modules[j], 0, -dirY * pushY);
-          }
+          var pushX = overlapX / 2 + CG_PAD_GAP;
+          var dir = aCx <= bCx ? -1 : 1;
+          translateModule(modules[i], dir * pushX, 0);
+          translateModule(modules[j], -dir * pushX, 0);
         }
       }
       if (!moved) break;
@@ -228,9 +204,11 @@ function cgRenderGraph(container, data) {
     .style("display", "block");
 
   var zoomLayer = svg.append("g");
+  // Center horizontally (root-at-top-center), anchor near the top vertically.
+  var xOffset = (width - (content.maxX - content.minX)) / 2 - content.minX;
   var root = zoomLayer
     .append("g")
-    .attr("transform", "translate(" + (110 - content.minX) + "," + (70 - content.minY) + ")");
+    .attr("transform", "translate(" + xOffset + "," + (70 - content.minY) + ")");
 
   var containerWidth = container.clientWidth || 1000;
   var fitScale = Math.min(
@@ -302,11 +280,25 @@ function cgRenderGraph(container, data) {
 
   var collapsed = {};
 
+  // Smooth top-to-bottom curves (the classic tree-diagram look), not
+  // straight lines — d3-dag's own precomputed multi-point paths aren't
+  // usable here since dragging/overlap-resolution move nodes independently
+  // of the original static layout, so edges are recomputed live from
+  // current positions on every redraw.
+  var linkGen = d3
+    .linkVertical()
+    .x(function (d) {
+      return d.x;
+    })
+    .y(function (d) {
+      return d.y;
+    });
+
   function edgePathD(fromId, toId) {
     var a = pos[fromId],
       b = pos[toId];
     if (!a || !b) return "";
-    return "M" + a.x + "," + a.y + "L" + b.x + "," + b.y;
+    return linkGen({ source: a, target: b });
   }
 
   var edgePaths = edgeLayer
