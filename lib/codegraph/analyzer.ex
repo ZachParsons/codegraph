@@ -33,6 +33,7 @@ defmodule Codegraph.Analyzer do
     :&,
     :/,
     :.,
+    :%,
     :%{},
     :{},
     :<<>>,

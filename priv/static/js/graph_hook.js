@@ -4,6 +4,12 @@ function cgNodeId(n) {
   return n.function ? n.module + "." + n.function + "/" + n.arity : n.module;
 }
 
+var CG_STATUS_COLOR = {
+  added: "#3fb950",
+  removed: "#f85149",
+  modified: "#d29922",
+};
+
 function cgRenderGraph(container, data) {
   container.innerHTML = "";
   if (!data.nodes.length) {
@@ -34,10 +40,12 @@ function cgRenderGraph(container, data) {
       return n.function;
     })
     .forEach(ensureNode);
+  var edgeStatusByKey = {};
   data.edges.forEach(function (e) {
     ensureNode(e.from);
     ensureNode(e.to);
     graph.link(cgNodeId(e.from), cgNodeId(e.to));
+    edgeStatusByKey[cgNodeId(e.from) + "->" + cgNodeId(e.to)] = e.status;
   });
 
   var layout = d3.sugiyama().nodeSize(function () {
@@ -134,6 +142,10 @@ function cgRenderGraph(container, data) {
     })
     .curve(d3.curveMonotoneY);
 
+  function edgeStatus(d) {
+    return edgeStatusByKey[d.source.data + "->" + d.target.data];
+  }
+
   root
     .append("g")
     .selectAll("path")
@@ -143,8 +155,15 @@ function cgRenderGraph(container, data) {
       return line(d.points);
     })
     .attr("fill", "none")
-    .attr("stroke", "#8a8a92")
-    .attr("stroke-width", 1.4)
+    .attr("stroke", function (d) {
+      return CG_STATUS_COLOR[edgeStatus(d)] || "#8a8a92";
+    })
+    .attr("stroke-width", function (d) {
+      return edgeStatus(d) in CG_STATUS_COLOR ? 2 : 1.4;
+    })
+    .attr("stroke-dasharray", function (d) {
+      return edgeStatus(d) === "removed" ? "4,3" : null;
+    })
     .attr("marker-end", "url(#cg-arrow)");
 
   var nodeG = root
@@ -158,16 +177,25 @@ function cgRenderGraph(container, data) {
 
   nodeG
     .append("circle")
-    .attr("r", 7)
+    .attr("r", function (d) {
+      return CG_STATUS_COLOR[nodesById[d.data].status] ? 8 : 7;
+    })
     .attr("fill", function (d) {
       var info = nodesById[d.data];
-      return info.external ? "#3a3a3f" : color(info.module);
+      if (info.external) return "#3a3a3f";
+      return CG_STATUS_COLOR[info.status] || color(info.module);
     })
     .attr("stroke", function (d) {
       var info = nodesById[d.data];
-      return info.external ? "#777" : "#fff";
+      if (info.external) return "#777";
+      return CG_STATUS_COLOR[info.status] || "#fff";
     })
-    .attr("stroke-width", 1.3)
+    .attr("stroke-width", function (d) {
+      return CG_STATUS_COLOR[nodesById[d.data].status] ? 2 : 1.3;
+    })
+    .attr("stroke-dasharray", function (d) {
+      return nodesById[d.data].status === "removed" ? "3,2" : null;
+    })
     .attr("opacity", function (d) {
       return nodesById[d.data].external ? 0.55 : 1;
     });
@@ -179,7 +207,9 @@ function cgRenderGraph(container, data) {
     .attr("font-family", "ui-monospace, monospace")
     .attr("font-size", 11)
     .attr("fill", function (d) {
-      return nodesById[d.data].external ? "#8a8a92" : "#eee";
+      var info = nodesById[d.data];
+      if (info.external) return "#8a8a92";
+      return CG_STATUS_COLOR[info.status] || "#eee";
     })
     .text(function (d) {
       var info = nodesById[d.data];

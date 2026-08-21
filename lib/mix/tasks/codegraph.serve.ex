@@ -4,13 +4,15 @@ defmodule Mix.Tasks.Codegraph.Serve do
   Starts the codegraph web UI against the current project.
 
       mix codegraph.serve [--port 4444] [--path lib] \\
-        [--root MyApp.Accounts] [--root MyApp.Billing] [--depth 2]
+        [--root MyApp.Accounts] [--root MyApp.Billing] [--depth 2] \\
+        [--diff BASE_REF..HEAD_REF]
 
   `--root` may be given multiple times to seed the BFS from several
   modules; omit it to render the whole project graph unscoped. `--depth`
   accepts an integer or `infinity`. `--path` is the directory to scan for
   `.ex` files (relative to the current project root); defaults to `lib`.
-  Diff flags (`--diff`) land once the diff analyzer exists.
+  `--diff` renders the diff between two git refs (e.g. `main..HEAD`)
+  instead of the working tree.
   """
   use Mix.Task
 
@@ -20,7 +22,7 @@ defmodule Mix.Tasks.Codegraph.Serve do
 
     {opts, _rest, _invalid} =
       OptionParser.parse(args,
-        strict: [port: :integer, path: :string, root: :keep, depth: :string]
+        strict: [port: :integer, path: :string, root: :keep, depth: :string, diff: :string]
       )
 
     port = Keyword.get(opts, :port, 4444)
@@ -37,11 +39,24 @@ defmodule Mix.Tasks.Codegraph.Serve do
         n -> String.to_integer(n)
       end
 
+    diff =
+      case Keyword.get(opts, :diff) do
+        nil ->
+          nil
+
+        spec ->
+          case String.split(spec, "..", parts: 2) do
+            [ref_a, ref_b] -> {ref_a, ref_b}
+            _ -> Mix.raise("--diff expects BASE_REF..HEAD_REF, got: #{inspect(spec)}")
+          end
+      end
+
     Application.put_env(:codegraph, :cli_opts,
       globs: [Path.join(path, "**/*.ex")],
       cwd: File.cwd!(),
       roots: roots,
-      depth: depth
+      depth: depth,
+      diff: diff
     )
 
     Application.put_env(:codegraph, Codegraph.Web.Endpoint,

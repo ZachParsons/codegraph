@@ -1,7 +1,7 @@
 defmodule Codegraph.Web.GraphLive do
   use Phoenix.LiveView
 
-  alias Codegraph.Scope
+  alias Codegraph.{Diff, Scope}
 
   def mount(_params, _session, socket) do
     opts = Application.get_env(:codegraph, :cli_opts, [])
@@ -9,9 +9,9 @@ defmodule Codegraph.Web.GraphLive do
     cwd = Keyword.get(opts, :cwd, File.cwd!())
     roots = Keyword.get(opts, :roots, [])
     depth = Keyword.get(opts, :depth, 2)
+    diff = Keyword.get(opts, :diff)
 
-    project = Scope.project_graph(globs, cwd)
-    graph = if roots == [], do: project, else: Scope.scope(project, roots, depth)
+    graph = build_graph(diff, globs, cwd, roots, depth)
 
     graph_json =
       Jason.encode!(%{
@@ -24,9 +24,24 @@ defmodule Codegraph.Web.GraphLive do
        graph_json: graph_json,
        node_count: length(graph.nodes),
        edge_count: length(graph.edges),
-       roots: roots
+       roots: roots,
+       diff: diff
      )}
   end
+
+  defp build_graph(nil, globs, cwd, roots, depth) do
+    project = Scope.project_graph(globs, cwd)
+    scoped(project, roots, depth)
+  end
+
+  defp build_graph({ref_a, ref_b}, globs, cwd, roots, depth) do
+    graph_a = Scope.project_graph_at(ref_a, globs, cwd) |> scoped(roots, depth)
+    graph_b = Scope.project_graph_at(ref_b, globs, cwd) |> scoped(roots, depth)
+    Diff.diff(graph_a, graph_b)
+  end
+
+  defp scoped(project, [], _depth), do: project
+  defp scoped(project, roots, depth), do: Scope.scope(project, roots, depth)
 
   def render(assigns) do
     ~H"""
@@ -38,11 +53,23 @@ defmodule Codegraph.Web.GraphLive do
           <%= if @roots != [] do %>
             &middot; root: {Enum.map_join(@roots, ", ", &inspect/1)}
           <% end %>
+          <%= if @diff do %>
+            &middot; diff: {elem(@diff, 0)}..{elem(@diff, 1)}
+          <% end %>
         </p>
+        <div :if={@diff} style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8rem;">
+          <span><span style={legend_dot("#3fb950")}></span> added</span>
+          <span><span style={legend_dot("#f85149")}></span> removed</span>
+          <span><span style={legend_dot("#d29922")}></span> modified</span>
+        </div>
       </header>
       <div id="graph" phx-hook="GraphViz" phx-update="ignore" data-graph={@graph_json}></div>
     </div>
     """
+  end
+
+  defp legend_dot(color) do
+    "display:inline-block; width:9px; height:9px; border-radius:50%; background:#{color}; margin-right:4px;"
   end
 
   defp node_json(n) do
