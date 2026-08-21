@@ -205,10 +205,13 @@ function cgRenderGraph(container, data) {
     nodeLayer[id] = layerIndexByY[Math.round(nodeLayer[id] * 100) / 100];
   });
 
-  // Floor raised from 60 to 70: labels can now be two lines (signature +
-  // return type), so a row needs a bit more clearance than a single line
-  // did to avoid touching the next depth level down.
-  var levelSpacing = Math.max(viewportHeight / layerYs.length, 70);
+  // 1.5x beyond the raw viewport-height/level-count split, floor raised
+  // 70->110: rows were still reading as cramped. The graph no longer
+  // necessarily fits the viewport vertically without scrolling/panning
+  // once depth is more than a handful of levels — an intentional
+  // trade-off for more breathing room per row, not the earlier goal of
+  // exactly filling the viewport at any level count.
+  var levelSpacing = Math.max((viewportHeight / layerYs.length) * 1.5, 110);
   Object.keys(pos).forEach(function (id) {
     pos[id].y = (nodeLayer[id] + 0.5) * levelSpacing;
   });
