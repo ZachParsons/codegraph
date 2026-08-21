@@ -20,12 +20,57 @@ defmodule Codegraph.Analyzer do
   alias Codegraph.Graph
   alias Codegraph.Graph.{Node, Edge}
 
-  @skip_call_heads ~w(
+  @skip_words ~w(
     def defp defmodule defmacro defmacrop defprotocol defimpl defdelegate
     defexception defstruct defguard defguardp defoverridable defrecord
     if unless case cond for with try receive fn quote unquote unquote_splicing
-    import alias require use super __block__ __aliases__
+    import alias require use super __block__ __aliases__ when
   )a
+
+  # Operators/syntax nodes that are shaped like calls in the raw AST but
+  # aren't meaningful "calls" for a call-graph visualization.
+  @skip_operators [
+    :&,
+    :/,
+    :.,
+    :%{},
+    :{},
+    :<<>>,
+    :=,
+    :<-,
+    :"\\",
+    :^,
+    :|,
+    :..,
+    :...,
+    :->,
+    :"::",
+    :"~",
+    :"@",
+    :+,
+    :-,
+    :*,
+    :++,
+    :--,
+    :==,
+    :!=,
+    :===,
+    :!==,
+    :<,
+    :>,
+    :<=,
+    :>=,
+    :&&,
+    :||,
+    :!,
+    :and,
+    :or,
+    :not,
+    :in,
+    :<>
+  ]
+
+  @skip_call_heads @skip_words ++ @skip_operators
 
   @doc "Analyze one file's source text into a `Codegraph.Graph`."
   @spec analyze_source(String.t(), String.t()) :: Graph.t()
@@ -129,7 +174,7 @@ defmodule Codegraph.Analyzer do
   defp maybe_add_edge(acc, %{module: mod, function: {fname, arity}}, target_mod, fun, target_arity) do
     from = %Node{module: mod, function: fname, arity: arity, external: false, status: :unchanged}
     to = %Node{module: target_mod, function: fun, arity: target_arity, external: false, status: :unchanged}
-    acc |> add_node(to) |> add_edge(%Edge{from: from, to: to, status: :unchanged})
+    add_edge(acc, %Edge{from: from, to: to, status: :unchanged})
   end
 
   defp maybe_add_edge(acc, _ctx_without_function, _target_mod, _fun, _arity), do: acc
