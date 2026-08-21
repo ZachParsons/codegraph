@@ -20,6 +20,13 @@ defmodule Mix.Tasks.Codegraph.Serve do
   def run(args) do
     Mix.Task.run("app.start")
 
+    # codegraph is meant to be added with `runtime: false` (it's a dev
+    # tool, not something the host app should boot on its own), which
+    # means `app.start` above deliberately does NOT start :codegraph or
+    # its own deps (:phoenix, :phoenix_pubsub, :bandit, ...) — we have to
+    # start them ourselves.
+    {:ok, _} = Application.ensure_all_started(:codegraph)
+
     {opts, _rest, _invalid} =
       OptionParser.parse(args,
         strict: [port: :integer, path: :string, root: :keep, depth: :string, diff: :string]
