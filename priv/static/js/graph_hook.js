@@ -323,8 +323,14 @@ function cgRenderGraph(container, data) {
   // overflows and is reached by panning (drag), which already works.
   var fitScale = Math.min((viewportHeight - 40) / (height + 70), 1);
 
+  // Tracked so node/module dragging (below) can convert screen-pixel drag
+  // deltas into data-space units — 1 screen pixel of mouse movement is
+  // 1/currentZoomK data units once zoomed in or out, not 1:1.
+  var currentZoomK = 1;
+
   var zoom = d3.zoom().on("zoom", function (event) {
     zoomLayer.attr("transform", event.transform);
+    currentZoomK = event.transform.k;
   });
   svg.call(zoom);
   svg.call(
@@ -547,14 +553,31 @@ function cgRenderGraph(container, data) {
   // .raise() targets the parent <g> (not just the circle/rect it's
   // called on) so the whole node — text included — still comes to front
   // while being dragged.
+  //
+  // .container() is pinned to the never-moving outer <svg>, not left at
+  // d3-drag's default (the dragged element's own parent). That default
+  // was the actual cause of the reported "growing lag between cursor and
+  // node": d3-drag measures each frame's pointer position relative to the
+  // container, and the badge/node's own parent <g> is exactly the element
+  // being translated as a RESULT of the drag (see redraw() below) — so
+  // the reference frame itself shifts by however much we just moved the
+  // node, under-counting the next frame's real mouse movement by that
+  // same amount, compounding every frame. A fixed container has no such
+  // feedback loop. Deltas from a fixed outer container come back in
+  // screen pixels, not data-space units, so they're divided by the
+  // current zoom scale (currentZoomK) before being applied to `pos` —
+  // 1 screen pixel is 1/currentZoomK data units once zoomed in or out.
   var moduleDrag = d3
     .drag()
+    .container(function () {
+      return svg.node();
+    })
     .clickDistance(6)
     .on("start", function () {
       d3.select(this.parentNode).raise();
     })
     .on("drag", function (event, mod) {
-      translateModule(mod, event.dx, event.dy);
+      translateModule(mod, event.dx / currentZoomK, event.dy / currentZoomK);
       redraw();
     });
 
@@ -586,6 +609,9 @@ function cgRenderGraph(container, data) {
   // instead of two different, inconsistently-working mechanisms.
   var nodeDrag = d3
     .drag()
+    .container(function () {
+      return svg.node();
+    })
     .filter(function (event) {
       return !event.button;
     })
@@ -602,14 +628,16 @@ function cgRenderGraph(container, data) {
     })
     .on("drag", function (event, id) {
       this._cgDragged = true;
+      var dx = event.dx / currentZoomK;
+      var dy = event.dy / currentZoomK;
       if (selectedIds.has(id) && selectedIds.size > 1) {
         selectedIds.forEach(function (sid) {
-          pos[sid].x += event.dx;
-          pos[sid].y += event.dy;
+          pos[sid].x += dx;
+          pos[sid].y += dy;
         });
       } else {
-        pos[id].x += event.dx;
-        pos[id].y += event.dy;
+        pos[id].x += dx;
+        pos[id].y += dy;
       }
       redraw();
     })
