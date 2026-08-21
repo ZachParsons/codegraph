@@ -4,20 +4,48 @@ function cgNodeId(n) {
   return n.function ? n.module + "." + n.function + "/" + n.arity : n.module;
 }
 
-// Parameter names always come from the def head itself. @spec is optional
-// idiomatic Elixir (no mandatory static types), so most functions won't
-// have one — those just get the plain signature line, no @spec line.
-function cgTooltip(id, info) {
-  var lines = [id];
-  if (info.params) {
-    lines.push(info.function + "(" + info.params.join(", ") + ")");
-  }
-  if (info.spec_args && info.spec_return) {
-    lines.push("@spec " + info.function + "(" + info.spec_args.join(", ") + ") :: " + info.spec_return);
-  } else if (info.external) {
-    lines.push("(external — not analyzed)");
-  }
-  return lines.join("\n");
+function cgTruncate(s, max) {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+// Elixir @spec commonly labels its own argument ("message :: Message.t()")
+// which would be redundant next to the def head's own param name of the
+// same thing — this keeps just the type half.
+function cgSpecType(specArg) {
+  var i = specArg.indexOf("::");
+  return i === -1 ? specArg : specArg.slice(i + 2).trim();
+}
+
+// Parameter names always come from the def head itself (no static types
+// required for that). @spec input/output types are layered on top only
+// when present — most functions won't have one, since @spec is optional
+// idiomatic Elixir, not mandatory. Always shown on the graph now (not a
+// hover tooltip), so this also drives each node's on-screen footprint —
+// see nodeSize below, which sizes each node's slot from these same lines
+// rather than a fixed guess.
+function cgLabelLines(info) {
+  if (!info.params) return [info.function + "/" + info.arity];
+
+  var paramList = info.params
+    .map(function (p, i) {
+      var specArg = info.spec_args && info.spec_args[i];
+      return specArg ? p + ": " + cgSpecType(specArg) : p;
+    })
+    .join(", ");
+
+  var lines = [cgTruncate(info.function + "(" + paramList + ")", 64)];
+  if (info.spec_return) lines.push(cgTruncate(":: " + info.spec_return, 64));
+  return lines;
+}
+
+var CG_CHAR_WIDTH = 6.6; // approx px/char for the 11px ui-monospace label font
+
+function cgLabelWidth(info) {
+  var lines = cgLabelLines(info);
+  var maxLen = lines.reduce(function (m, l) {
+    return Math.max(m, l.length);
+  }, 0);
+  return maxLen * CG_CHAR_WIDTH + 34; // +34 for the node circle + left gap
 }
 
 var CG_STATUS_COLOR = {
@@ -91,15 +119,20 @@ function cgRenderGraph(container, data) {
   // complaint on a shallow/wide graph — reverted, since that put depth on
   // the horizontal axis and roots off to one side instead of on top.)
   //
-  // The 160 here only feeds sugiyama's own internal layout math (crossing
-  // minimization etc.) — it does NOT determine final on-screen vertical
-  // spacing, which is recomputed just below from the actual viewport
-  // height and level count instead of a fixed guess. Within-layer spacing
-  // is trimmed slightly (175, vs. 190 originally) rather than
-  // aggressively, since function names are long enough that packing
-  // siblings much tighter starts overlapping labels.
-  var layout = d3.sugiyama().nodeSize(function () {
-    return [175, 160];
+  // The second value (160) only feeds sugiyama's own internal layout math
+  // (crossing minimization etc.) — it does NOT determine final on-screen
+  // vertical spacing, which is recomputed just below from the actual
+  // viewport height and level count instead of a fixed guess.
+  //
+  // The first value is now computed PER NODE from that node's own label
+  // (function name + param names + types, always shown on the graph, not
+  // hidden behind a hover) rather than one fixed width for every node —
+  // sugiyama's nodeSize callback receives the node itself, so a node with
+  // a long typed signature gets more room and a short one doesn't waste
+  // space it doesn't need.
+  var layout = d3.sugiyama().nodeSize(function (node) {
+    var info = nodesById[node.data];
+    return [Math.max(cgLabelWidth(info), 120), 160];
   });
   var extent = layout(graph);
 
@@ -131,7 +164,10 @@ function cgRenderGraph(container, data) {
   layerYs.forEach(function (y, i) {
     layerIndexByY[y] = i;
   });
-  var levelSpacing = Math.max(viewportHeight / layerYs.length, 60);
+  // Floor raised from 60 to 70: labels can now be two lines (signature +
+  // return type), so a row needs a bit more clearance than a single line
+  // did to avoid touching the next depth level down.
+  var levelSpacing = Math.max(viewportHeight / layerYs.length, 70);
   Object.keys(pos).forEach(function (id) {
     var layerIndex = layerIndexByY[Math.round(pos[id].y * 100) / 100];
     pos[id].y = (layerIndex + 0.5) * levelSpacing;
@@ -382,10 +418,12 @@ function cgRenderGraph(container, data) {
       return nodesById[id].external ? 0.55 : 1;
     });
 
+  // Multi-line label (signature line, plus a return-type line when a
+  // @spec provides one) via tspans — a plain .text() can't hold a line
+  // break, and these are shown directly on the graph now, not tucked
+  // behind a hover.
   nodeG
     .append("text")
-    .attr("x", 11)
-    .attr("y", 4)
     .attr("font-family", "ui-monospace, monospace")
     .attr("font-size", 11)
     .attr("fill", function (id) {
@@ -393,13 +431,20 @@ function cgRenderGraph(container, data) {
       if (info.external) return "#8a8a92";
       return CG_STATUS_COLOR[info.status] || "#eee";
     })
-    .text(function (id) {
-      var info = nodesById[id];
-      return info.function + "/" + info.arity;
+    .each(function (id) {
+      var lines = cgLabelLines(nodesById[id]);
+      var text = d3.select(this);
+      lines.forEach(function (line, i) {
+        text
+          .append("tspan")
+          .attr("x", 11)
+          .attr("dy", i === 0 ? 4 : 12)
+          .text(line);
+      });
     });
 
   nodeG.append("title").text(function (id) {
-    return cgTooltip(id, nodesById[id]);
+    return id;
   });
 
   function redraw() {
