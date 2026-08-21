@@ -151,9 +151,22 @@ function cgRenderGraph(container, data) {
   // Mutable render-space position store — the single source of truth used
   // by every draw call below, so dragging and overlap resolution can move
   // nodes freely without needing to touch the underlying d3-dag layout.
+  //
+  // Layer (depth) assignment comes from sugiyama: correctly handling
+  // arbitrary DAG topology (nodes reachable via more than one path, etc.)
+  // is genuinely hard to get right by hand, so that part is kept.
+  // Horizontal position within a layer does NOT come from sugiyama — its
+  // own x is purely an edge-crossing-minimization heuristic with no
+  // relationship to the source code (confirmed: neither call order nor
+  // definition order). That's replaced below with a call-order pass
+  // instead, since edgeList is already in call order end to end (see
+  // Codegraph.Analyzer/Scope) — x starts at 0 here and gets a real value
+  // once each node's layer is known.
   var pos = {};
+  var nodeLayer = {};
   Array.from(graph.nodes()).forEach(function (n) {
-    pos[n.data] = { x: n.x, y: n.y };
+    pos[n.data] = { x: 0, y: n.y };
+    nodeLayer[n.data] = n.y;
   });
 
   // A fixed per-level pixel gap either wastes the viewport (few levels)
@@ -165,8 +178,8 @@ function cgRenderGraph(container, data) {
   var viewportHeight = Math.max(window.innerHeight - 140, 400);
   var layerYs = Array.from(
     new Set(
-      Array.from(graph.nodes()).map(function (n) {
-        return Math.round(n.y * 100) / 100;
+      Object.keys(nodeLayer).map(function (id) {
+        return Math.round(nodeLayer[id] * 100) / 100;
       })
     )
   ).sort(function (a, b) {
@@ -176,13 +189,54 @@ function cgRenderGraph(container, data) {
   layerYs.forEach(function (y, i) {
     layerIndexByY[y] = i;
   });
+  Object.keys(nodeLayer).forEach(function (id) {
+    nodeLayer[id] = layerIndexByY[Math.round(nodeLayer[id] * 100) / 100];
+  });
+
   // Floor raised from 60 to 70: labels can now be two lines (signature +
   // return type), so a row needs a bit more clearance than a single line
   // did to avoid touching the next depth level down.
   var levelSpacing = Math.max(viewportHeight / layerYs.length, 70);
   Object.keys(pos).forEach(function (id) {
-    var layerIndex = layerIndexByY[Math.round(pos[id].y * 100) / 100];
-    pos[id].y = (layerIndex + 0.5) * levelSpacing;
+    pos[id].y = (nodeLayer[id] + 0.5) * levelSpacing;
+  });
+
+  // Call-order horizontal placement: DFS from the root layer (layer 0),
+  // visiting each node's callees in edgeList's order — a node reached via
+  // more than one caller keeps whichever DFS path finds it first. Nodes
+  // within a layer are then packed left-to-right in that discovery order,
+  // each sized by its own label width so longer signatures don't overlap
+  // their neighbor.
+  var childrenOf = {};
+  edgeList.forEach(function (e) {
+    if (!pos[e.fromId] || !pos[e.toId] || e.fromId === e.toId) return;
+    (childrenOf[e.fromId] = childrenOf[e.fromId] || []).push(e.toId);
+  });
+
+  var orderInLayer = {};
+  var orderVisited = {};
+  function visitForOrder(id) {
+    if (orderVisited[id]) return;
+    orderVisited[id] = true;
+    var layer = nodeLayer[id];
+    (orderInLayer[layer] = orderInLayer[layer] || []).push(id);
+    (childrenOf[id] || []).forEach(visitForOrder);
+  }
+  Object.keys(nodeLayer)
+    .filter(function (id) {
+      return nodeLayer[id] === 0;
+    })
+    .forEach(visitForOrder);
+  Object.keys(nodeLayer).forEach(visitForOrder); // any node not reached from a layer-0 root
+
+  Object.keys(orderInLayer).forEach(function (layer) {
+    var x = 0;
+    orderInLayer[layer].forEach(function (id) {
+      var w = cgLabelWidth(nodesById[id]);
+      x += w / 2;
+      pos[id].x = x;
+      x += w / 2 + 24;
+    });
   });
 
   var byModuleIds = {};
