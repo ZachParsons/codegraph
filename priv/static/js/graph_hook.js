@@ -18,6 +18,17 @@ function cgRenderGraph(container, data) {
     return;
   }
 
+  var toolbar = document.createElement("div");
+  toolbar.style.cssText =
+    "padding: 0.5rem 1.5rem; display:flex; align-items:center; gap:0.5rem;";
+  toolbar.innerHTML =
+    '<input type="text" placeholder="filter by module or function…" ' +
+    'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
+    'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
+    '<span style="opacity:0.5; font-size:11px;">click a module label to collapse it</span>';
+  container.appendChild(toolbar);
+  var searchInput = toolbar.querySelector("input");
+
   var nodesById = {};
   data.nodes
     .filter(function (n) {
@@ -115,8 +126,18 @@ function cgRenderGraph(container, data) {
       .attr("fill", color(mod))
       .attr("font-size", 11)
       .attr("font-family", "ui-monospace, monospace")
-      .text(mod);
+      .style("cursor", "pointer")
+      .text(mod + "  (click to collapse)")
+      .on("click", function () {
+        toggleModule(mod);
+      });
   });
+
+  var collapsed = {};
+  function toggleModule(mod) {
+    collapsed[mod] = !collapsed[mod];
+    applyFilters();
+  }
 
   svg
     .append("defs")
@@ -146,7 +167,7 @@ function cgRenderGraph(container, data) {
     return edgeStatusByKey[d.source.data + "->" + d.target.data];
   }
 
-  root
+  var edgePaths = root
     .append("g")
     .selectAll("path")
     .data(Array.from(graph.links()))
@@ -171,6 +192,9 @@ function cgRenderGraph(container, data) {
     .selectAll("g")
     .data(Array.from(graph.nodes()))
     .join("g")
+    .attr("data-module", function (d) {
+      return nodesById[d.data].module;
+    })
     .attr("transform", function (d) {
       return "translate(" + d.x + "," + d.y + ")";
     });
@@ -219,6 +243,29 @@ function cgRenderGraph(container, data) {
   nodeG.append("title").text(function (d) {
     return d.data;
   });
+
+  function applyFilters() {
+    var query = (searchInput.value || "").toLowerCase();
+
+    nodeG.style("display", function (d) {
+      var info = nodesById[d.data];
+      if (collapsed[info.module]) return "none";
+      if (query && d.data.toLowerCase().indexOf(query) === -1) return "none";
+      return null;
+    });
+
+    edgePaths.style("display", function (d) {
+      var hide =
+        collapsed[nodesById[d.source.data].module] ||
+        collapsed[nodesById[d.target.data].module] ||
+        (query &&
+          d.source.data.toLowerCase().indexOf(query) === -1 &&
+          d.target.data.toLowerCase().indexOf(query) === -1);
+      return hide ? "none" : null;
+    });
+  }
+
+  searchInput.addEventListener("input", applyFilters);
 }
 
 window.CodegraphHooks.GraphViz = {
