@@ -185,13 +185,16 @@ function cgRenderGraph(container, data) {
     .attr("d", "M0,-5L10,0L0,5")
     .attr("fill", "#8a8a92");
 
+  // d3-dag link.points are plain [x, y] pairs, not {x, y} objects — these
+  // are d3.line()'s default accessors, kept explicit here so the shape
+  // this depends on doesn't get "fixed" back to object-style by mistake.
   var line = d3
     .line()
     .x(function (d) {
-      return d.x;
+      return d[0];
     })
     .y(function (d) {
-      return d.y;
+      return d[1];
     })
     .curve(d3.curveMonotoneY);
 
