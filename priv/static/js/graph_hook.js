@@ -488,11 +488,18 @@ function cgRenderGraph(container, data) {
   }
   redraw();
 
+  // Drag handles are the circle/rect only, never the text — a drag
+  // behavior on an element swallows the mousedown+move gesture that
+  // native browser text selection also needs, so attaching it to the
+  // whole node/badge group (text included) made every label unselectable.
+  // .raise() targets the parent <g> (not just the circle/rect it's
+  // called on) so the whole node — text included — still comes to front
+  // while being dragged.
   var moduleDrag = d3
     .drag()
     .clickDistance(6)
     .on("start", function () {
-      d3.select(this).raise();
+      d3.select(this.parentNode).raise();
     })
     .on("drag", function (event, mod) {
       translateModule(mod, event.dx, event.dy);
@@ -511,7 +518,7 @@ function cgRenderGraph(container, data) {
   var nodeDrag = d3
     .drag()
     .on("start", function (event, id) {
-      d3.select(this).raise();
+      d3.select(this.parentNode).raise();
       if (!selectedIds.has(id)) {
         selectedIds.clear();
         updateSelectionHighlight();
@@ -529,15 +536,22 @@ function cgRenderGraph(container, data) {
       }
       redraw();
     });
-  nodeG.call(nodeDrag);
-  clusters.call(moduleDrag);
+  nodeG.select("circle").call(nodeDrag);
+  clusters.select("rect").call(moduleDrag);
 
   // Rubber-band select: shift+drag on empty canvas draws a selection box;
   // every node whose center falls inside it becomes draggable as a group
   // (via nodeDrag above). Shift is required so this doesn't fight the
   // existing plain-drag-to-pan behavior on the same background.
+  //
+  // Also excludes text/tspan targets — without this, a mousedown starting
+  // on a label (no longer caught by node/module drag above, now that
+  // those are circle/rect-only) would bubble up and start a pan instead,
+  // which would swallow the text-selection gesture just as effectively.
   zoom.filter(function (event) {
-    return (!event.ctrlKey || event.type === "wheel") && !event.button && !event.shiftKey;
+    var tag = event.target && event.target.tagName;
+    var isText = tag === "text" || tag === "tspan";
+    return (!event.ctrlKey || event.type === "wheel") && !event.button && !event.shiftKey && !isText;
   });
 
   var selectionStart = null;
