@@ -4,15 +4,18 @@ defmodule Mix.Tasks.Codegraph.Serve do
   Starts the codegraph web UI against the current project.
 
       mix codegraph.serve [--port 4444] [--path lib] \\
-        [--root MyApp.Accounts] [--root MyApp.Billing] [--depth 2] \\
-        [--diff BASE_REF..HEAD_REF]
+        [--root MyApp.Accounts] [--root MyApp.Billing.create_invoice/2] \\
+        [--depth 2] [--diff BASE_REF..HEAD_REF]
 
-  `--root` may be given multiple times to seed the BFS from several
-  modules; omit it to render the whole project graph unscoped. `--depth`
-  accepts an integer or `infinity`. `--path` is the directory to scan for
-  `.ex` files (relative to the current project root); defaults to `lib`.
-  `--diff` renders the diff between two git refs (e.g. `main..HEAD`)
-  instead of the working tree.
+  `--root` may be given multiple times to seed the BFS from several roots,
+  and each one is either a module (`MyApp.Accounts`, seeds from every
+  function it defines) or one specific function (`MyApp.Accounts.
+  create_user/1` — the trailing `/N` arity is what marks it as a function
+  rather than a module). Omit `--root` entirely to render the whole
+  project graph unscoped. `--depth` accepts an integer or `infinity`.
+  `--path` is the directory to scan for `.ex` files (relative to the
+  current project root); defaults to `lib`. `--diff` renders the diff
+  between two git refs (e.g. `main..HEAD`) instead of the working tree.
   """
   use Mix.Task
 
@@ -38,7 +41,7 @@ defmodule Mix.Tasks.Codegraph.Serve do
     roots =
       opts
       |> Keyword.get_values(:root)
-      |> Enum.map(&Module.concat([&1]))
+      |> Enum.map(&parse_root/1)
 
     depth =
       case Keyword.get(opts, :depth, "2") do
@@ -93,5 +96,20 @@ defmodule Mix.Tasks.Codegraph.Serve do
 
     Mix.shell().info("codegraph listening on http://localhost:#{port}")
     Process.sleep(:infinity)
+  end
+
+  # A trailing "/N" (digits only) is treated as an arity, marking this
+  # root as one specific function rather than a whole module — module
+  # names can't end in "/N", so there's no ambiguity to resolve.
+  @root_function_pattern ~r/^(.+)\.([^.\/]+)\/(\d+)$/
+
+  defp parse_root(str) do
+    case Regex.run(@root_function_pattern, str) do
+      [_, mod_str, fun_str, arity_str] ->
+        {:function, Module.concat([mod_str]), String.to_atom(fun_str), String.to_integer(arity_str)}
+
+      nil ->
+        {:module, Module.concat([str])}
+    end
   end
 end

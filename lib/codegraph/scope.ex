@@ -71,9 +71,17 @@ defmodule Codegraph.Scope do
     %Graph{nodes: Enum.uniq(defined_nodes ++ external_nodes), edges: edges}
   end
 
+  @typedoc """
+  A root to seed the BFS from: either every function defined directly in a
+  module, or one specific function.
+  """
+  @type root :: {:module, module()} | {:function, module(), atom(), non_neg_integer()}
+
   @doc """
-  BFS from `roots` (a list of module atoms) out to `depth` hops
-  (non-negative integer, or `:infinity` for the full transitive closure).
+  BFS from `roots` out to `depth` hops (non-negative integer, or
+  `:infinity` for the full transitive closure). Each root is either
+  `{:module, Mod}` (seeds from every function `Mod` defines) or
+  `{:function, Mod, name, arity}` (seeds from just that one function).
 
   Preserves call order (the order edges were found in the source, already
   preserved through `project_graph/2`'s merge) in the returned edges/nodes,
@@ -81,25 +89,35 @@ defmodule Codegraph.Scope do
   lets the UI lay out sibling nodes left-to-right in call order instead of
   an arbitrary one.
   """
-  @spec scope(Graph.t(), [module()], non_neg_integer() | :infinity) :: Graph.t()
+  @spec scope(Graph.t(), [root()], non_neg_integer() | :infinity) :: Graph.t()
   def scope(%Graph{} = graph, roots, depth \\ 2) do
-    roots = MapSet.new(roots)
+    root_modules = roots |> Enum.map(&root_module/1) |> MapSet.new()
 
     edges_by_from =
       Enum.group_by(graph.edges, fn e -> {e.from.module, e.from.function, e.from.arity} end)
 
-    start = Enum.filter(graph.nodes, fn n -> n.function != nil and MapSet.member?(roots, n.module) end)
+    start = Enum.filter(graph.nodes, fn n -> n.function != nil and matches_root?(n, roots) end)
 
     acc = %{node_set: MapSet.new(start), node_list: start, edge_set: MapSet.new(), edge_list: []}
     acc = bfs(start, edges_by_from, depth, acc)
 
     module_nodes =
-      Enum.filter(graph.nodes, fn n -> is_nil(n.function) and MapSet.member?(roots, n.module) end)
+      Enum.filter(graph.nodes, fn n -> is_nil(n.function) and MapSet.member?(root_modules, n.module) end)
 
     %Graph{
       nodes: Enum.uniq(acc.node_list ++ module_nodes),
       edges: acc.edge_list
     }
+  end
+
+  defp root_module({:module, mod}), do: mod
+  defp root_module({:function, mod, _name, _arity}), do: mod
+
+  defp matches_root?(node, roots) do
+    Enum.any?(roots, fn
+      {:module, mod} -> node.module == mod
+      {:function, mod, name, arity} -> node.module == mod and node.function == name and node.arity == arity
+    end)
   end
 
   defp bfs(_frontier, _edges_by_from, depth, acc) when depth < 0, do: acc

@@ -18,17 +18,25 @@ defmodule Codegraph.ScopeTest do
   test "scope BFS respects depth and stops at external boundary nodes" do
     graph = Scope.project_graph(["*.ex"], @fixtures)
 
-    depth0 = Scope.scope(graph, [A], 0)
+    depth0 = Scope.scope(graph, [{:module, A}], 0)
     assert Enum.any?(depth0.nodes, &(&1.module == A and &1.function == :entry))
     assert depth0.edges == []
 
-    depth1 = Scope.scope(graph, [A], 1)
+    depth1 = Scope.scope(graph, [{:module, A}], 1)
     assert Enum.any?(depth1.nodes, &(&1.module == B and &1.function == :step))
     assert Enum.any?(depth1.nodes, &(&1.module == Enum and &1.function == :map and &1.external))
     refute Enum.any?(depth1.nodes, &(&1.module == C))
 
-    depth2 = Scope.scope(graph, [A], 2)
+    depth2 = Scope.scope(graph, [{:module, A}], 2)
     assert Enum.any?(depth2.nodes, &(&1.module == C and &1.function == :deep))
+  end
+
+  test "a function root seeds from just that function, not the whole module" do
+    graph = Scope.project_graph(["*.ex"], @fixtures)
+
+    scoped = Scope.scope(graph, [{:function, A, :entry, 1}], 1)
+    assert Enum.any?(scoped.nodes, &(&1.module == A and &1.function == :entry))
+    assert Enum.any?(scoped.nodes, &(&1.module == B and &1.function == :step))
   end
 
   test "scope preserves call order through the BFS, not just at the analyzer" do
@@ -51,7 +59,7 @@ defmodule Codegraph.ScopeTest do
     """)
 
     graph = Scope.project_graph(["*.ex"], dir)
-    scoped = Scope.scope(graph, [Root], 1)
+    scoped = Scope.scope(graph, [{:module, Root}], 1)
 
     order =
       scoped.edges

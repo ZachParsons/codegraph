@@ -51,7 +51,7 @@ defmodule Codegraph.Web.GraphLive do
         <p style="opacity: 0.6; margin: 0; font-size: 0.85rem;">
           {@node_count} nodes, {@edge_count} edges
           <%= if @roots != [] do %>
-            &middot; root: {Enum.map_join(@roots, ", ", &inspect/1)}
+            &middot; root: {Enum.map_join(@roots, ", ", &root_label/1)}
           <% end %>
           <%= if @diff do %>
             &middot; diff: {elem(@diff, 0)}..{elem(@diff, 1)}
@@ -67,6 +67,9 @@ defmodule Codegraph.Web.GraphLive do
     </div>
     """
   end
+
+  defp root_label({:module, mod}), do: inspect(mod)
+  defp root_label({:function, mod, name, arity}), do: "#{inspect(mod)}.#{name}/#{arity}"
 
   defp legend_dot(color) do
     "display:inline-block; width:9px; height:9px; border-radius:50%; background:#{color}; margin-right:4px;"
