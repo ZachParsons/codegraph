@@ -7,9 +7,12 @@ defmodule Codegraph.Analyzer do
   This is a best-effort static walk, not a full compiler:
     - Local calls are only recognized when parenthesized (`foo(x)`), since
       `foo` alone is ambiguous with a variable reference in the raw AST.
-    - Remote calls via an `alias`ed name (`alias Foo.Bar, as: FB; FB.baz()`)
-      resolve to the literal alias (`FB.baz/1`), not the real target,
-      since we don't run the compiler's alias-resolution table.
+    - `alias` (plain, `as:`, and multi-alias `Mod.{A, B}` forms) is tracked
+      per module, module-wide regardless of where it's declared (same
+      approximation as @spec below) — but only within the same file. An
+      alias declared in one file has no effect on a call to that alias'
+      name written in a *different* file, since each file is analyzed
+      independently with no cross-file symbol table.
     - Calls through captures (`&Mod.fun/1`), `apply/3`, or dynamically
       built module names are not resolved.
   These gaps are acceptable for a call-graph visualization: unresolved or
@@ -79,7 +82,7 @@ defmodule Codegraph.Analyzer do
     quoted = Code.string_to_quoted!(source, file: file)
 
     acc =
-      walk(quoted, %{module: nil, function: nil}, %{
+      walk(quoted, %{module: nil, function: nil, aliases: %{}}, %{
         nodes: MapSet.new(),
         edges: MapSet.new(),
         specs: %{}
@@ -111,7 +114,7 @@ defmodule Codegraph.Analyzer do
   defp walk({:defmodule, _, [alias_ast, [do: body]]}, ctx, acc) do
     mod = resolve_alias(alias_ast, ctx.module)
     acc = add_node(acc, %Node{module: mod, external: false, status: :unchanged})
-    walk(body, %{ctx | module: mod, function: nil}, acc)
+    walk(body, %{ctx | module: mod, function: nil, aliases: collect_aliases(body)}, acc)
   end
 
   # -- def/defp: register the function, descend with new function context --
@@ -152,7 +155,7 @@ defmodule Codegraph.Analyzer do
   # -- remote call: Mod.fun(args) --
   defp walk({{:., _, [mod_ast, fun]}, _, args}, ctx, acc) when is_atom(fun) and is_list(args) do
     acc =
-      case resolve_call_target(mod_ast, ctx.module) do
+      case resolve_call_target(mod_ast, ctx) do
         nil -> acc
         target -> maybe_add_edge(acc, ctx, target, fun, length(args))
       end
@@ -178,7 +181,7 @@ defmodule Codegraph.Analyzer do
 
   defp walk_pipe_rhs({{:., _, [mod_ast, fun]}, _, args}, ctx, acc) when is_atom(fun) and is_list(args) do
     acc =
-      case resolve_call_target(mod_ast, ctx.module) do
+      case resolve_call_target(mod_ast, ctx) do
         nil -> acc
         target -> maybe_add_edge(acc, ctx, target, fun, length(args) + 1)
       end
@@ -228,10 +231,82 @@ defmodule Codegraph.Analyzer do
   defp resolve_alias({:__aliases__, _, parts}, parent), do: Module.concat([parent | parts])
   defp resolve_alias(_other, parent), do: parent || :"UnresolvedModule"
 
-  defp resolve_call_target({:__aliases__, _, parts}, _current), do: Module.concat(parts)
-  defp resolve_call_target({:__MODULE__, _, _}, current), do: current
-  defp resolve_call_target(mod, _current) when is_atom(mod), do: mod
-  defp resolve_call_target(_dynamic, _current), do: nil
+  # `Mod.fun()` where `Mod`'s first segment matches a tracked alias (e.g.
+  # `alias Broadway.Topology; Topology.RateLimiter.foo()`) resolves through
+  # the alias to the real module (Broadway.Topology.RateLimiter), not the
+  # literal written segment — without this, idiomatic aliased calls to a
+  # project's own other modules were misresolved as external, since the
+  # literal alias name rarely matches any module actually defined anywhere.
+  defp resolve_call_target({:__aliases__, _, [first | rest]}, ctx) do
+    case Map.get(ctx.aliases, first) do
+      nil -> Module.concat([first | rest])
+      aliased when rest == [] -> aliased
+      aliased -> Module.concat([aliased | rest])
+    end
+  end
+
+  defp resolve_call_target({:__MODULE__, _, _}, ctx), do: ctx.module
+  defp resolve_call_target(mod, _ctx) when is_atom(mod), do: mod
+  defp resolve_call_target(_dynamic, _ctx), do: nil
+
+  # Scans a module's body for `alias` statements (plain, `as:`, and
+  # multi-alias `Mod.{A, B}` forms) and returns the resulting alias-name
+  # to real-module map. Applied module-wide (see moduledoc) rather than
+  # threaded incrementally through the walk, since ctx flows top-down
+  # through the AST and wouldn't otherwise reach sibling statements later
+  # in the same block.
+  defp collect_aliases(ast), do: do_collect_aliases(ast, %{})
+
+  defp do_collect_aliases({:alias, _, [mod_ast]}, acc) do
+    Map.merge(acc, alias_bindings(mod_ast, []))
+  end
+
+  defp do_collect_aliases({:alias, _, [mod_ast, opts]}, acc) when is_list(opts) do
+    Map.merge(acc, alias_bindings(mod_ast, opts))
+  end
+
+  defp do_collect_aliases({_, _, args}, acc) when is_list(args) do
+    Enum.reduce(args, acc, &do_collect_aliases/2)
+  end
+
+  defp do_collect_aliases({a, b}, acc) do
+    acc = do_collect_aliases(a, acc)
+    do_collect_aliases(b, acc)
+  end
+
+  defp do_collect_aliases(list, acc) when is_list(list) do
+    Enum.reduce(list, acc, &do_collect_aliases/2)
+  end
+
+  defp do_collect_aliases(_other, acc), do: acc
+
+  # `alias Mod.{A, B}` — the multi-alias macro call `Mod.{}(A, B)`.
+  defp alias_bindings({{:., _, [base_ast, :{}]}, _, items}, _opts) do
+    base =
+      case base_ast do
+        {:__aliases__, _, base_parts} -> base_parts
+        _ -> []
+      end
+
+    items
+    |> Enum.filter(&match?({:__aliases__, _, _}, &1))
+    |> Map.new(fn {:__aliases__, _, sub_parts} ->
+      {List.last(sub_parts), Module.concat(base ++ sub_parts)}
+    end)
+  end
+
+  # `alias Mod.Sub` (binds the last segment) or `alias Mod.Sub, as: Name`.
+  defp alias_bindings({:__aliases__, _, parts}, opts) do
+    key =
+      case Keyword.get(opts, :as) do
+        {:__aliases__, _, [as_name]} -> as_name
+        _ -> List.last(parts)
+      end
+
+    %{key => Module.concat(parts)}
+  end
+
+  defp alias_bindings(_other, _opts), do: %{}
 
   defp maybe_add_edge(acc, %{module: mod, function: {fname, arity}}, target_mod, fun, target_arity) do
     from = %Node{module: mod, function: fname, arity: arity, external: false, status: :unchanged}

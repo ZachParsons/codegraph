@@ -121,4 +121,61 @@ defmodule Codegraph.AnalyzerTest do
     assert node.spec_args == nil
     assert node.spec_return == nil
   end
+
+  test "resolves calls through a plain alias" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        alias Foo.Bar
+
+        def a(x), do: Bar.b(x)
+      end
+      """)
+
+    assert Enum.any?(graph.edges, fn e -> e.to.module == Foo.Bar and e.to.function == :b end)
+    refute Enum.any?(graph.edges, fn e -> e.to.module == Bar end)
+  end
+
+  test "resolves calls through an `as:` alias" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        alias Foo.Bar, as: B
+
+        def a(x), do: B.b(x)
+      end
+      """)
+
+    assert Enum.any?(graph.edges, fn e -> e.to.module == Foo.Bar and e.to.function == :b end)
+  end
+
+  test "resolves calls through a multi-alias Mod.{A, B}" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        alias Foo.{Bar, Baz}
+
+        def a(x), do: Bar.b(x)
+        def c(x), do: Baz.d(x)
+      end
+      """)
+
+    assert Enum.any?(graph.edges, fn e -> e.to.module == Foo.Bar and e.to.function == :b end)
+    assert Enum.any?(graph.edges, fn e -> e.to.module == Foo.Baz and e.to.function == :d end)
+  end
+
+  test "alias resolves a deeper reference, not just the aliased segment itself" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        alias Foo.Topology
+
+        def a(x), do: Topology.RateLimiter.b(x)
+      end
+      """)
+
+    assert Enum.any?(graph.edges, fn e ->
+             e.to.module == Foo.Topology.RateLimiter and e.to.function == :b
+           end)
+  end
 end
