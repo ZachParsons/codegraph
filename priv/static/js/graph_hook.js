@@ -16,6 +16,17 @@ function cgSpecType(specArg) {
   return i === -1 ? specArg : specArg.slice(i + 2).trim();
 }
 
+// Node color alone doesn't reliably identify a module: the palette
+// (d3.schemeTableau10) only has 10 distinct colors, and any scope with
+// more than 10 modules — which is most real ones — has to reuse colors,
+// so two different modules can land on the same one. Prefixing every
+// label with the module's last name segment makes it unambiguous by
+// text, regardless of how many modules or how the palette recycles.
+function cgModuleShort(mod) {
+  var parts = mod.split(".");
+  return parts[parts.length - 1];
+}
+
 // Parameter names always come from the def head itself (no static types
 // required for that). @spec input/output types are layered on top only
 // when present — most functions won't have one, since @spec is optional
@@ -24,7 +35,9 @@ function cgSpecType(specArg) {
 // see nodeSize below, which sizes each node's slot from these same lines
 // rather than a fixed guess.
 function cgLabelLines(info) {
-  if (!info.params) return [info.function + "/" + info.arity];
+  var modPrefix = cgModuleShort(info.module) + ".";
+
+  if (!info.params) return [modPrefix + info.function + "/" + info.arity];
 
   var paramList = info.params
     .map(function (p, i) {
@@ -33,7 +46,7 @@ function cgLabelLines(info) {
     })
     .join(", ");
 
-  var lines = [cgTruncate(info.function + "(" + paramList + ")", 64)];
+  var lines = [cgTruncate(modPrefix + info.function + "(" + paramList + ")", 64)];
   if (info.spec_return) lines.push(cgTruncate(":: " + info.spec_return, 64));
   return lines;
 }
