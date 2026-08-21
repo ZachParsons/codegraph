@@ -11,12 +11,14 @@ defmodule Codegraph.Scope do
   """
 
   alias Codegraph.Analyzer
+  alias Codegraph.GitSource
   alias Codegraph.Graph
   alias Codegraph.Graph.Edge
 
   @doc """
-  Analyze every file matched by `globs` (relative to `cwd`) and merge into
-  one project-wide graph with `external` resolved on every node/edge.
+  Analyze every file matched by `globs` (relative to `cwd`) on disk and
+  merge into one project-wide graph with `external` resolved on every
+  node/edge.
   """
   @spec project_graph([String.t()], String.t()) :: Graph.t()
   def project_graph(globs \\ ["lib/**/*.ex"], cwd \\ File.cwd!()) do
@@ -25,7 +27,31 @@ defmodule Codegraph.Scope do
       |> Enum.flat_map(&Path.wildcard(Path.join(cwd, &1)))
       |> Enum.uniq()
 
-    file_graphs = Enum.map(files, &Analyzer.analyze_file/1)
+    files |> Enum.map(&Analyzer.analyze_file/1) |> merge()
+  end
+
+  @doc """
+  Same as `project_graph/2`, but reads source as it existed at `ref` via
+  `git show` instead of the working tree — no checkout needed.
+  """
+  @spec project_graph_at(String.t(), [String.t()], String.t()) :: Graph.t()
+  def project_graph_at(ref, globs \\ ["lib/**/*.ex"], cwd \\ File.cwd!()) do
+    paths =
+      globs
+      |> Enum.flat_map(&GitSource.list_files(ref, &1, cwd))
+      |> Enum.uniq()
+
+    paths
+    |> Enum.flat_map(fn path ->
+      case GitSource.read_file(ref, path, cwd) do
+        {:ok, source} -> [Analyzer.analyze_source(source, path)]
+        :error -> []
+      end
+    end)
+    |> merge()
+  end
+
+  defp merge(file_graphs) do
     definitions = file_graphs |> Enum.flat_map(& &1.nodes) |> Enum.uniq()
 
     defined_functions =
