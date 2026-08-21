@@ -27,7 +27,7 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
-    '<span style="opacity:0.5; font-size:11px;">drag a module to move it · click its label to collapse it</span>';
+    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
 
@@ -73,11 +73,16 @@ function cgRenderGraph(container, data) {
   // traditional top-down tree: roots at low y, leaves at high y, callers
   // above callees. (An earlier version swapped x/y to fight a "too wide"
   // complaint on a shallow/wide graph — reverted, since that put depth on
-  // the horizontal axis and roots off to one side instead of on top. A
-  // wide call graph is still going to be wide here; that's what a wide
-  // tree looks like. Pan/zoom is the answer, not fighting the axes.)
+  // the horizontal axis and roots off to one side instead of on top.)
+  //
+  // Between-layer spacing is intentionally generous (160, vs. 80 before)
+  // so depth actually reads as vertical distance instead of everything
+  // feeling flattened into a couple of cramped rows — that's what "too
+  // shallow" meant. Within-layer spacing is only trimmed slightly (175,
+  // vs. 190) rather than aggressively, since function names are long
+  // enough that packing siblings much tighter starts overlapping labels.
   var layout = d3.sugiyama().nodeSize(function () {
-    return [190, 80];
+    return [175, 160];
   });
   var extent = layout(graph);
 
@@ -291,7 +296,8 @@ function cgRenderGraph(container, data) {
     .join("g")
     .attr("data-module", function (id) {
       return nodesById[id].module;
-    });
+    })
+    .style("cursor", "grab");
 
   nodeG
     .append("circle")
@@ -366,6 +372,22 @@ function cgRenderGraph(container, data) {
       translateModule(mod, event.dx, event.dy);
       redraw();
     });
+
+  // Individual nodes are draggable too, independent of their module's
+  // badge (which still drags every node in that module together). No
+  // module box remains to imply "drag this whole region", so with the
+  // box gone the node itself is the thing you'd naturally reach for.
+  var nodeDrag = d3
+    .drag()
+    .on("start", function () {
+      d3.select(this).raise();
+    })
+    .on("drag", function (event, id) {
+      pos[id].x += event.dx;
+      pos[id].y += event.dy;
+      redraw();
+    });
+  nodeG.call(nodeDrag);
   clusters.call(moduleDrag);
 
   function applyFilters() {
