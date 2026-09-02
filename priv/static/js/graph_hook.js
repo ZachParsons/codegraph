@@ -60,15 +60,26 @@ function cgLabelWidth(info) {
   return maxLen * CG_CHAR_WIDTH + 34; // +34 for the node circle + left gap
 }
 
+// A box's own label (its full module name, shown once at the box's
+// top-left — see cgRenderGraph) can be wider than every one of its
+// member nodes' own cgLabelWidth (a deeply nested module name next to a
+// short function name/arity, say). Shared by both the box-aware contour
+// layout (which must reserve enough horizontal space to avoid a
+// neighboring box) and the actual rectangle drawn later — using the same
+// formula in both places is what keeps a box's drawn width from
+// silently exceeding what was reserved for it, which is what let two
+// short-content, long-module-name boxes overlap.
+function cgBoxLabelWidth(moduleName) {
+  return moduleName.length * CG_CHAR_WIDTH + 16;
+}
+
 var CG_STATUS_COLOR = {
   added: "#3fb950",
   removed: "#f85149",
   modified: "#d29922",
 };
 
-var CG_CALLER_EDGE_COLOR = "#7c6fd6"; // distinguishes a caller edge (pointing into the root from above) from a regular descendant edge
-
-var CG_BADGE_GAP = 34; // vertical gap between a module's badge and its topmost node
+var CG_CALLER_EDGE_COLOR = "#5a5a66"; // dim/halftone — the caller tree above the root is implicit context, not the primary call tree
 
 // Escape clears both node selection and any active browser text
 // selection. Tracked at module scope (not just inside cgRenderGraph) so a
@@ -201,14 +212,13 @@ function cgRenderGraph(container, data) {
   // handling arbitrary DAG topology (nodes reachable via more than one
   // path, etc.) is genuinely hard to get right by hand, so that part is
   // kept as the fallback for the unscoped (no --root) whole-project view,
-  // where there's no notion of "modules away from a root" to draw on.
-  // Whenever a node DOES carry a `level` (Codegraph.Scope.scope/3's own
-  // module-hop BFS — see its moduledoc), that's used instead: sugiyama's
-  // layer is one row per function-CALL hop, which put a module's own
-  // internal call chain on several different rows even though none of it
-  // ever left the module — `level` instead gives every function in a
-  // module the same row, and only advances a row when a call actually
-  // crosses into a different module.
+  // where there's no root to BFS from at all. Whenever a node DOES carry
+  // a `level` (Codegraph.Scope.scope/4's own function-call-hop BFS — see
+  // its moduledoc), that's used instead: it's exactly "how many calls
+  // from the nearest root", giving one row per call including calls that
+  // stay inside the same module — sugiyama's own layer can skip rows
+  // along a single edge (a child isn't guaranteed to be exactly
+  // parent-layer+1, only >), which `level` doesn't.
   //
   // Horizontal position within a layer does NOT come from sugiyama — its
   // own x is purely an edge-crossing-minimization heuristic with no
@@ -261,26 +271,26 @@ function cgRenderGraph(container, data) {
     pos[id].y = (nodeLayer[id] + 0.5) * levelSpacing;
   });
 
-  // Tidy-tree horizontal placement: each parent centered over its own
-  // children, with no overlap, by RESERVING space top-down from
-  // precomputed subtree widths — rather than packing left-to-right first
-  // and trying to re-center/repair afterward. An earlier version tried
-  // the repair approach (pack in call order, then sweep parents toward
-  // their children's midpoint, pushing right on conflict); verified
-  // against real data that it was badly wrong — many same-layer siblings
-  // with close desired centers compounded into 300-500px drift, nowhere
-  // near actually centered. This is a simplified Reingold-Tilford: no
-  // "contour threading" to compact uneven subtree depths, but correct on
-  // the two things that matter here — no overlap, and every parent
-  // genuinely centered over its children's actual span.
+  // Tidy-tree horizontal placement: nodes are first grouped into "boxes" —
+  // a box is a maximal run of directly-connected same-module nodes along
+  // the spanning tree (a straight chain, or a small branching sub-tree,
+  // all in one module) — then BOXES, not individual nodes, are the units
+  // a Reingold-Tilford-with-contour-merge places left to right, each
+  // parent box centered over its own child boxes with no overlap. A
+  // module whose functions appear in several disconnected places in the
+  // call tree gets several separate boxes, one per occurrence — there's
+  // no single global "the Foo module" region, only wherever a same-module
+  // chain actually occurs, which is also what lets a widely-shared callee
+  // (a stdlib helper, say) stay a single node with multiple incoming
+  // edges rather than needing to be duplicated per caller.
   //
   // A general DAG isn't a tree, though (a node can have more than one
   // caller) — so this first picks ONE spanning tree out of it via DFS
-  // from the layer-0 roots, in call order (edgeList's order), same as
-  // before: a node reached by more than one caller is positioned under
-  // whichever caller's DFS found it first, and its OTHER callers still
-  // get their edge drawn to wherever it ends up, without influencing that
-  // position themselves.
+  // from the layer-0 roots, in call order (edgeList's order): a node
+  // reached by more than one caller is positioned under whichever
+  // caller's DFS found it first (and so belongs to whichever box that
+  // caller occurs in), and its OTHER callers still get their edge drawn
+  // to wherever it ends up, without influencing that position themselves.
   var childrenOf = {};
   edgeList.forEach(function (e) {
     if (!pos[e.fromId] || !pos[e.toId] || e.fromId === e.toId) return;
@@ -290,16 +300,36 @@ function cgRenderGraph(container, data) {
   var treeVisited = {};
   var treeChildrenOf = {};
   var treeRoots = [];
+  var parentOf = {};
   function visitForTree(id, parent) {
     if (treeVisited[id]) return;
     treeVisited[id] = true;
     if (parent === undefined) {
       treeRoots.push(id);
     } else {
+      parentOf[id] = parent;
       (treeChildrenOf[parent] = treeChildrenOf[parent] || []).push(id);
     }
     (childrenOf[id] || []).forEach(function (childId) {
-      visitForTree(childId, id);
+      // A node reachable via more than one caller must be claimed by a
+      // caller whose OWN layer is consistent with it — otherwise this
+      // DFS (which explores fully before backtracking to a sibling) can
+      // claim it under a LONGER real path before its true shortest-path
+      // caller (elsewhere in the walk) ever gets the chance, stranding
+      // it a row below where `level` (a shortest-hop BFS count — see
+      // Codegraph.Scope.scope/4) actually puts it, which visibly
+      // conflicts with whichever OTHER node legitimately occupies that
+      // row. With a real `level` present, "consistent" means exactly
+      // one row deeper (`level` is a hop count, not just monotonic); the
+      // unscoped whole-project view has no such `level` and falls back
+      // to sugiyama's own layer, which only guarantees a child's layer
+      // is GREATER, not exactly +1 (see the layer-assignment note above).
+      var childInfo = nodesById[childId];
+      var consistent =
+        childInfo && childInfo.level != null
+          ? nodeLayer[childId] === nodeLayer[id] + 1
+          : nodeLayer[childId] > nodeLayer[id];
+      if (consistent) visitForTree(childId, id);
     });
   }
   Object.keys(nodeLayer)
@@ -311,6 +341,26 @@ function cgRenderGraph(container, data) {
     });
   Object.keys(nodeLayer).forEach(function (id) {
     visitForTree(id, undefined); // any node not reached from a layer-0 root becomes its own root
+  });
+
+  // Box assignment: walk the spanning tree top-down; a node continues its
+  // parent's box when they're in the same module, otherwise it starts a
+  // new one. `boxMembers` is in DFS/call order, matching edgeList's own
+  // order (see the note above on why that matters for layout).
+  var boxOf = {};
+  var boxMembers = {};
+  function assignBox(id, currentBox) {
+    var sameModuleAsParent =
+      parentOf[id] !== undefined && nodesById[id].module === nodesById[parentOf[id]].module;
+    var box = sameModuleAsParent ? currentBox : id;
+    boxOf[id] = box;
+    (boxMembers[box] = boxMembers[box] || []).push(id);
+    (treeChildrenOf[id] || []).forEach(function (childId) {
+      assignBox(childId, box);
+    });
+  }
+  treeRoots.forEach(function (id) {
+    assignBox(id, id);
   });
 
   // Real Reingold-Tilford, via contour merging — replaces an earlier
@@ -329,6 +379,17 @@ function cgRenderGraph(container, data) {
   // width. Two subtrees that are both narrow at some deep layer can
   // interleave closely there even if one of them is wide higher up.
   //
+  // A box, though, reserves its OWN full width (not each row's own
+  // narrower content) at EVERY layer it spans, uniformly — otherwise a
+  // neighboring box could tuck in close at one of this box's narrower
+  // rows and end up visually inside its drawn rectangle at a wider row
+  // above or below. This is computed in two passes: `layoutBoxLocal`
+  // first lays out a box's own same-module descendants only, giving its
+  // real internal shape and overall width; `layoutBox` then treats the
+  // box as the atomic unit for the OUTER merge, contributing that width
+  // uniformly across all its layers, with each cross-module child (an
+  // "exit") recursively becoming another box.
+  //
   // Contours are keyed by ABSOLUTE layer number (nodeLayer[id]), not by
   // depth-relative-to-this-subtree's-own-root — an earlier version of
   // this used relative depth and was verified to still produce real
@@ -343,26 +404,12 @@ function cgRenderGraph(container, data) {
   // per-layer values so gaps don't need explicit padding.
   var TREE_GAP = 24;
 
-  function layoutSubtreeContour(id) {
-    var ownHalf = cgLabelWidth(nodesById[id]) / 2;
-    var myLayer = nodeLayer[id];
-    var kids = treeChildrenOf[id];
-
-    if (!kids) {
-      var leafRelX = {};
-      leafRelX[id] = 0;
-      var leafLeft = {};
-      var leafRight = {};
-      leafLeft[myLayer] = -ownHalf;
-      leafRight[myLayer] = ownHalf;
-      return { leftContour: leafLeft, rightContour: leafRight, relX: leafRelX };
-    }
-
-    var childLayouts = kids.map(layoutSubtreeContour);
-
-    // Place children left to right: each new child is shifted just far
-    // enough right that, at every ABSOLUTE layer where it and everything
-    // already placed both have a contour, they're at least TREE_GAP apart.
+  // Shared by layoutBoxLocal/layoutBox below (and by the root-level merge
+  // further down): places `childLayouts` left to right, shifting each one
+  // just far enough right that, at every ABSOLUTE layer where it and
+  // everything already placed both have a contour, they're at least
+  // TREE_GAP apart.
+  function mergeChildrenLeftToRight(childLayouts) {
     var offsets = new Array(childLayouts.length);
     var combinedLeft = {};
     var combinedRight = {};
@@ -388,11 +435,38 @@ function cgRenderGraph(container, data) {
         }
       });
     });
+    return { offsets: offsets, combinedLeft: combinedLeft, combinedRight: combinedRight };
+  }
+
+  // A box's own internal layout: same contour algorithm as before,
+  // restricted to same-box (same-module) children only. Gives each
+  // member's position relative to the box's own root, and the box's real
+  // per-layer left/right silhouette — used by layoutBox below to derive
+  // its overall reserved width.
+  function layoutBoxLocal(id) {
+    var ownHalf = cgLabelWidth(nodesById[id]) / 2;
+    var myLayer = nodeLayer[id];
+    var kids = (treeChildrenOf[id] || []).filter(function (c) {
+      return boxOf[c] === boxOf[id];
+    });
+
+    if (!kids.length) {
+      var leafRelX = {};
+      leafRelX[id] = 0;
+      var leafLeft = {};
+      var leafRight = {};
+      leafLeft[myLayer] = -ownHalf;
+      leafRight[myLayer] = ownHalf;
+      return { leftContour: leafLeft, rightContour: leafRight, relX: leafRelX };
+    }
+
+    var childLayouts = kids.map(layoutBoxLocal);
+    var merged = mergeChildrenLeftToRight(childLayouts);
 
     var relX = {};
     childLayouts.forEach(function (cl, i) {
       Object.keys(cl.relX).forEach(function (nid) {
-        relX[nid] = cl.relX[nid] + offsets[i];
+        relX[nid] = cl.relX[nid] + merged.offsets[i];
       });
     });
 
@@ -402,10 +476,6 @@ function cgRenderGraph(container, data) {
     var lastKidX = relX[kids[kids.length - 1]];
     var nodeX = (firstKidX + lastKidX) / 2;
 
-    // Re-center everything so `id` itself sits at relative x 0 — keeps
-    // this function's contract consistent regardless of nesting depth,
-    // so a caller merging this subtree in as someone else's child can
-    // always treat offset 0 as "exactly where the node itself belongs".
     relX[id] = 0;
     Object.keys(relX).forEach(function (nid) {
       if (nid !== id) relX[nid] -= nodeX;
@@ -415,49 +485,116 @@ function cgRenderGraph(container, data) {
     var rightContour = {};
     leftContour[myLayer] = -ownHalf;
     rightContour[myLayer] = ownHalf;
-    Object.keys(combinedLeft).forEach(function (layer) {
-      leftContour[layer] = combinedLeft[layer] - nodeX;
-      rightContour[layer] = combinedRight[layer] - nodeX;
+    Object.keys(merged.combinedLeft).forEach(function (layer) {
+      leftContour[layer] = merged.combinedLeft[layer] - nodeX;
+      rightContour[layer] = merged.combinedRight[layer] - nodeX;
+    });
+
+    return { leftContour: leftContour, rightContour: rightContour, relX: relX };
+  }
+
+  // The outer layout: boxes (not individual nodes) are the units placed
+  // left to right. A box's "children", for this purpose, are the OTHER
+  // boxes reached by a cross-module edge ("exit") from ANY of its own
+  // members (flattened in box-member order, which is call order) — each
+  // recursively laid out the same way. The box contributes a UNIFORM
+  // left/right silhouette at every layer it spans (its own overall width,
+  // from layoutBoxLocal above), not its real per-row width, so a
+  // neighboring box can never tuck into one of its narrower rows.
+  function layoutBox(boxId) {
+    var local = layoutBoxLocal(boxId);
+    var layers = Object.keys(local.leftContour).map(Number);
+    var boxLeft = Math.min.apply(
+      null,
+      layers.map(function (l) {
+        return local.leftContour[l];
+      })
+    );
+    var boxRight = Math.max.apply(
+      null,
+      layers.map(function (l) {
+        return local.rightContour[l];
+      })
+    );
+    // The box's own label can be wider than its content (see
+    // cgBoxLabelWidth) — reserve for that too, growing only to the
+    // right, matching how boxRect below draws it (left edge fixed).
+    boxRight = Math.max(boxRight, boxLeft + cgBoxLabelWidth(nodesById[boxId].module));
+
+    var exitBoxIds = [];
+    boxMembers[boxId].forEach(function (memberId) {
+      (treeChildrenOf[memberId] || []).forEach(function (childId) {
+        if (boxOf[childId] !== boxId) exitBoxIds.push(childId);
+      });
+    });
+
+    if (!exitBoxIds.length) {
+      var leftOnly = {};
+      var rightOnly = {};
+      layers.forEach(function (l) {
+        leftOnly[l] = boxLeft;
+        rightOnly[l] = boxRight;
+      });
+      return { leftContour: leftOnly, rightContour: rightOnly, relX: local.relX };
+    }
+
+    // A pseudo "self" entry, fixed first (mergeChildrenLeftToRight never
+    // shifts the first item), representing the box's own uniform
+    // footprint at its own layers. Exits are placed relative to it via
+    // the SAME merge, so one that lands at the same absolute layer as
+    // the box's own internal content — very common: an external call
+    // made directly from the box's root sits at the same layer as the
+    // box's other same-module siblings — still ends up TREE_GAP clear of
+    // it, instead of only ever being checked against other exits.
+    var selfEntry = { leftContour: {}, rightContour: {}, relX: {} };
+    layers.forEach(function (l) {
+      selfEntry.leftContour[l] = boxLeft;
+      selfEntry.rightContour[l] = boxRight;
+    });
+
+    var exitLayouts = exitBoxIds.map(layoutBox);
+    var merged = mergeChildrenLeftToRight([selfEntry].concat(exitLayouts));
+
+    var relX = {};
+    Object.keys(local.relX).forEach(function (nid) {
+      relX[nid] = local.relX[nid];
+    });
+    exitLayouts.forEach(function (cl, i) {
+      var offset = merged.offsets[i + 1]; // +1: offsets[0] is the self entry
+      Object.keys(cl.relX).forEach(function (nid) {
+        relX[nid] = cl.relX[nid] + offset;
+      });
+    });
+
+    var firstX = relX[exitBoxIds[0]];
+    var lastX = relX[exitBoxIds[exitBoxIds.length - 1]];
+    var nodeX = (firstX + lastX) / 2;
+
+    Object.keys(relX).forEach(function (nid) {
+      relX[nid] -= nodeX;
+    });
+
+    var leftContour = {};
+    var rightContour = {};
+    Object.keys(merged.combinedLeft).forEach(function (layer) {
+      leftContour[layer] = merged.combinedLeft[layer] - nodeX;
+      rightContour[layer] = merged.combinedRight[layer] - nodeX;
     });
 
     return { leftContour: leftContour, rightContour: rightContour, relX: relX };
   }
 
   // Same contour-merge logic applies one level up, to place the separate
-  // root subtrees (Broadway's own several functions, say) against each
-  // other — an imaginary shared parent isn't needed, just the same
-  // left-to-right contour comparison used for siblings above.
-  var rootLayouts = treeRoots.map(layoutSubtreeContour);
-  var rootOffsets = new Array(rootLayouts.length);
-  var rootCombinedLeft = {};
-  var rootCombinedRight = {};
-  rootLayouts.forEach(function (rl, i) {
-    var shift = 0;
-    if (i > 0) {
-      Object.keys(rl.leftContour).forEach(function (layer) {
-        if (!rootCombinedRight.hasOwnProperty(layer)) return;
-        var needed = rootCombinedRight[layer] + TREE_GAP - rl.leftContour[layer];
-        if (needed > shift) shift = needed;
-      });
-    }
-    rootOffsets[i] = shift;
-    Object.keys(rl.leftContour).forEach(function (layer) {
-      var lv = rl.leftContour[layer] + shift;
-      var rv = rl.rightContour[layer] + shift;
-      if (rootCombinedLeft.hasOwnProperty(layer)) {
-        if (lv < rootCombinedLeft[layer]) rootCombinedLeft[layer] = lv;
-        if (rv > rootCombinedRight[layer]) rootCombinedRight[layer] = rv;
-      } else {
-        rootCombinedLeft[layer] = lv;
-        rootCombinedRight[layer] = rv;
-      }
-    });
-  });
+  // root boxes (Broadway's own entry box, say) against each other — an
+  // imaginary shared parent isn't needed, just the same left-to-right
+  // contour comparison used for sibling boxes above.
+  var rootLayouts = treeRoots.map(layoutBox);
+  var rootMerged = mergeChildrenLeftToRight(rootLayouts);
 
   treeRoots.forEach(function (id, i) {
     var rl = rootLayouts[i];
     Object.keys(rl.relX).forEach(function (nid) {
-      pos[nid].x = rl.relX[nid] + rootOffsets[i];
+      pos[nid].x = rl.relX[nid] + rootMerged.offsets[i];
     });
   });
 
@@ -529,37 +666,72 @@ function cgRenderGraph(container, data) {
     });
   });
 
-  var byModuleIds = {};
-  Object.keys(nodesById).forEach(function (id) {
-    if (!pos[id]) return; // external node with no position (shouldn't happen for function nodes)
-    var mod = nodesById[id].module;
-    (byModuleIds[mod] = byModuleIds[mod] || []).push(id);
+  // Callers never went through the box-assignment DFS above (they're
+  // placed by hand, right above), so each one becomes its own singleton
+  // box here — Codegraph.Scope only ever looks up one generation of
+  // caller, so there's never a same-module chain to fold them into
+  // anyway. This also sweeps up any other id with a position but no box
+  // yet, for the same reason.
+  Object.keys(pos).forEach(function (id) {
+    if (!boxOf[id]) {
+      boxOf[id] = id;
+      boxMembers[id] = [id];
+    }
   });
-  var modules = Object.keys(byModuleIds);
-  var color = d3.scaleOrdinal(d3.schemeTableau10).domain(modules);
 
-  function translateModule(mod, dx, dy) {
-    byModuleIds[mod].forEach(function (id) {
+  var boxIds = Object.keys(boxMembers).filter(function (id) {
+    return pos[id]; // external node with no position (shouldn't happen for function nodes)
+  });
+  var moduleNames = Array.from(
+    new Set(
+      boxIds.map(function (id) {
+        return nodesById[id].module;
+      })
+    )
+  );
+  var color = d3.scaleOrdinal(d3.schemeTableau10).domain(moduleNames);
+
+  function translateBox(boxId, dx, dy) {
+    boxMembers[boxId].forEach(function (id) {
       pos[id].x += dx;
       pos[id].y += dy;
     });
   }
 
-  // A module's functions can end up anywhere sugiyama's crossing-
-  // minimization happens to put them — there's no notion of "keep this
-  // module's nodes together" — so drawing one bounding box around a
-  // module's full scatter routinely produces a big box around two nodes
-  // sitting far apart, mostly empty space. Module identity is already
-  // shown by node color, so instead of a box: a small floating label,
-  // anchored above whichever of the module's nodes is closest to the
-  // root (lowest y), used as the drag handle / collapse target.
-  function moduleAnchor(mod) {
-    var ids = byModuleIds[mod];
-    var top = ids[0];
-    ids.forEach(function (id) {
-      if (pos[id].y < pos[top].y) top = id;
+  // A box is drawn as an actual rectangle around its own members (unlike
+  // the single global floating label this replaced) — that's only
+  // possible now because box assignment (above) already keeps a
+  // same-module chain visually contiguous, and the box-aware contour
+  // layout already reserves enough space that nothing else lands inside
+  // it. Estimated (not DOM-measured) label width, so this can run before
+  // any SVG text exists — used both for the initial viewport sizing
+  // (contentExtent below) and every redraw.
+  var BOX_PAD_X = 10;
+  var BOX_PAD_TOP = 26;
+  var BOX_PAD_BOTTOM = 10;
+  var NODE_HALF_ROW = 28; // half a node's own rendered height (circle + multi-line label)
+
+  function boxRect(boxId) {
+    var minX = Infinity,
+      maxX = -Infinity,
+      minY = Infinity,
+      maxY = -Infinity;
+    boxMembers[boxId].forEach(function (id) {
+      var p = pos[id];
+      var half = Math.max(cgLabelWidth(nodesById[id]), 120) / 2;
+      if (p.x - half < minX) minX = p.x - half;
+      if (p.x + half > maxX) maxX = p.x + half;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
     });
-    return pos[top];
+    var labelWidth = cgBoxLabelWidth(nodesById[boxId].module);
+    var width = Math.max(maxX - minX + BOX_PAD_X * 2, labelWidth + BOX_PAD_X);
+    return {
+      x: minX - BOX_PAD_X,
+      y: minY - NODE_HALF_ROW - BOX_PAD_TOP,
+      width: width,
+      height: maxY - minY + NODE_HALF_ROW * 2 + BOX_PAD_TOP + BOX_PAD_BOTTOM,
+    };
   }
 
   function contentExtent() {
@@ -567,16 +739,14 @@ function cgRenderGraph(container, data) {
       maxX = -Infinity,
       minY = Infinity,
       maxY = -Infinity;
-    Object.keys(pos).forEach(function (id) {
-      var p = pos[id];
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
+    boxIds.forEach(function (id) {
+      var r = boxRect(id);
+      if (r.x < minX) minX = r.x;
+      if (r.x + r.width > maxX) maxX = r.x + r.width;
+      if (r.y < minY) minY = r.y;
+      if (r.y + r.height > maxY) maxY = r.y + r.height;
     });
-    // -90/+200 for label width, -50 to leave room for badges above the
-    // topmost nodes.
-    return { minX: minX - 90, maxX: maxX + 200, minY: minY - 50, maxY: maxY };
+    return { minX: minX - 20, maxX: maxX + 20, minY: minY - 20, maxY: maxY + 20 };
   }
 
   var content = contentExtent();
@@ -646,46 +816,51 @@ function cgRenderGraph(container, data) {
   var edgeLayer = root.append("g");
   var nodeLayer = root.append("g");
 
-  var clusters = clusterLayer.selectAll("g").data(modules).join("g");
+  // One rectangle per box (see box assignment above), not per module —
+  // a module whose functions occur in several disconnected places in the
+  // tree gets one rectangle per occurrence, each still colored/labeled by
+  // its module name. A caller box (see callerOnlyIds) is dimmed and
+  // dashed to read as implicit/background context, matching the ordinary
+  // downward tree's full-contrast boxes.
+  var clusters = clusterLayer
+    .selectAll("g")
+    .data(boxIds)
+    .join("g")
+    .style("opacity", function (id) {
+      return callerOnlyIds.has(id) ? 0.5 : 1;
+    });
 
   clusters
     .append("rect")
-    .attr("rx", 6)
-    .attr("height", 22)
+    .attr("rx", 8)
     .attr("fill", "#16161c")
-    .attr("fill-opacity", 0.92)
-    .attr("stroke", function (mod) {
-      return color(mod);
+    .attr("fill-opacity", 0.5)
+    .attr("stroke", function (id) {
+      return color(nodesById[id].module);
     })
     .attr("stroke-width", 1.2)
+    .attr("stroke-dasharray", function (id) {
+      return callerOnlyIds.has(id) ? "3,3" : null;
+    })
     .style("cursor", "grab");
 
   clusters
     .append("text")
     .attr("x", 8)
     .attr("y", 15)
-    .attr("fill", function (mod) {
-      return color(mod);
+    .attr("fill", function (id) {
+      return color(nodesById[id].module);
     })
     .attr("font-size", 11)
     .attr("font-family", "ui-monospace, monospace")
     .style("cursor", "text")
-    .text(function (mod) {
-      return mod;
+    .text(function (id) {
+      return nodesById[id].module;
     })
-    .on("click", function (event, mod) {
-      collapsed[mod] = !collapsed[mod];
+    .on("click", function (event, id) {
+      collapsed[id] = !collapsed[id];
       applyFilters();
     });
-
-  var badgeWidth = {};
-  clusters.each(function (mod) {
-    var g = d3.select(this);
-    var bbox = g.select("text").node().getBBox();
-    var w = bbox.width + 16;
-    badgeWidth[mod] = w;
-    g.select("rect").attr("width", w);
-  });
 
   var collapsed = {};
 
@@ -718,6 +893,9 @@ function cgRenderGraph(container, data) {
     .attr("stroke-dasharray", function (e) {
       return e.status === "removed" ? "4,3" : null;
     })
+    .attr("opacity", function (e) {
+      return e.kind === "caller" ? 0.6 : 1;
+    })
     .attr("marker-end", "url(#cg-arrow)");
 
   var nodeIds = Object.keys(pos);
@@ -730,7 +908,7 @@ function cgRenderGraph(container, data) {
   function nodeStroke(id) {
     if (selectedIds.has(id)) return "#4f9dff";
     var info = nodesById[id];
-    if (info.external) return "#777";
+    if (info.external || callerOnlyIds.has(id)) return "#777";
     return CG_STATUS_COLOR[info.status] || "#fff";
   }
 
@@ -774,7 +952,7 @@ function cgRenderGraph(container, data) {
     })
     .attr("fill", function (id) {
       var info = nodesById[id];
-      if (info.external) return "#3a3a3f";
+      if (info.external || callerOnlyIds.has(id)) return "#3a3a3f";
       return CG_STATUS_COLOR[info.status] || color(info.module);
     })
     .attr("stroke", nodeStroke)
@@ -783,7 +961,7 @@ function cgRenderGraph(container, data) {
       return nodesById[id].status === "removed" ? "3,2" : null;
     })
     .attr("opacity", function (id) {
-      return nodesById[id].external ? 0.55 : 1;
+      return nodesById[id].external || callerOnlyIds.has(id) ? 0.55 : 1;
     })
     .style("cursor", "grab");
 
@@ -799,7 +977,7 @@ function cgRenderGraph(container, data) {
     .attr("font-size", 11)
     .attr("fill", function (id) {
       var info = nodesById[id];
-      if (info.external) return "#8a8a92";
+      if (info.external || callerOnlyIds.has(id)) return "#8a8a92";
       return CG_STATUS_COLOR[info.status] || "#eee";
     })
     .style("cursor", "text")
@@ -812,7 +990,7 @@ function cgRenderGraph(container, data) {
         .attr("x", 11)
         .attr("dy", -3)
         .attr("font-size", 9)
-        .attr("fill", info.external ? "#666" : color(info.module))
+        .attr("fill", info.external || callerOnlyIds.has(id) ? "#666" : color(info.module))
         .text(cgModuleShort(info.module));
 
       cgLabelLines(info).forEach(function (line, i) {
@@ -838,10 +1016,11 @@ function cgRenderGraph(container, data) {
       return edgePathD(e.fromId, e.toId);
     });
 
-    clusters.attr("transform", function (mod) {
-      var a = moduleAnchor(mod);
-      var w = badgeWidth[mod] || 0;
-      return "translate(" + (a.x - w / 2) + "," + (a.y - CG_BADGE_GAP) + ")";
+    clusters.each(function (id) {
+      var r = boxRect(id);
+      var g = d3.select(this);
+      g.attr("transform", "translate(" + r.x + "," + r.y + ")");
+      g.select("rect").attr("width", r.width).attr("height", r.height);
     });
   }
   redraw();
@@ -867,7 +1046,7 @@ function cgRenderGraph(container, data) {
   // screen pixels, not data-space units, so they're divided by the
   // current zoom scale (currentZoomK) before being applied to `pos` —
   // 1 screen pixel is 1/currentZoomK data units once zoomed in or out.
-  var moduleDrag = d3
+  var boxDrag = d3
     .drag()
     .container(function () {
       return svg.node();
@@ -876,15 +1055,13 @@ function cgRenderGraph(container, data) {
     .on("start", function () {
       d3.select(this.parentNode).raise();
     })
-    .on("drag", function (event, mod) {
-      translateModule(mod, event.dx / currentZoomK, event.dy / currentZoomK);
+    .on("drag", function (event, id) {
+      translateBox(id, event.dx / currentZoomK, event.dy / currentZoomK);
       redraw();
     });
 
-  // Individual nodes are draggable too, independent of their module's
-  // badge (which still drags every node in that module together). No
-  // module box remains to imply "drag this whole region", so with the
-  // box gone the node itself is the thing you'd naturally reach for.
+  // Individual nodes are draggable too, independent of their box (which
+  // still drags every member of that box together).
   //
   // Dragging a node that's part of the current selection (built via
   // shift+drag-an-area, or shift/ctrl/cmd+click — see "end" below) moves
@@ -957,7 +1134,7 @@ function cgRenderGraph(container, data) {
   var nodeCircles = nodeG.select("circle");
   nodeCircles.call(nodeDrag);
 
-  clusters.select("rect").call(moduleDrag);
+  clusters.select("rect").call(boxDrag);
 
   // Rubber-band select: shift+drag on empty canvas draws a selection box;
   // every node whose center falls inside it becomes draggable as a group
@@ -1036,24 +1213,24 @@ function cgRenderGraph(container, data) {
     var query = (searchInput.value || "").toLowerCase();
 
     nodeG.style("display", function (id) {
-      var info = nodesById[id];
-      if (collapsed[info.module]) return "none";
+      if (collapsed[boxOf[id]]) return "none";
       if (query && id.toLowerCase().indexOf(query) === -1) return "none";
       return null;
     });
 
     edgePaths.style("display", function (e) {
       var hide =
-        collapsed[nodesById[e.fromId].module] ||
-        collapsed[nodesById[e.toId].module] ||
+        collapsed[boxOf[e.fromId]] ||
+        collapsed[boxOf[e.toId]] ||
         (query &&
           e.fromId.toLowerCase().indexOf(query) === -1 &&
           e.toId.toLowerCase().indexOf(query) === -1);
       return hide ? "none" : null;
     });
 
-    clusters.style("opacity", function (mod) {
-      return collapsed[mod] ? 0.35 : 1;
+    clusters.style("opacity", function (id) {
+      var base = callerOnlyIds.has(id) ? 0.5 : 1;
+      return collapsed[id] ? 0.35 * base : base;
     });
   }
 

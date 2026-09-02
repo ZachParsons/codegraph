@@ -5,15 +5,21 @@ defmodule Mix.Tasks.Codegraph do
 
       mix codegraph [--port 4444] [--path lib] \\
         [--root MyApp.Accounts] [--root MyApp.Billing.create_invoice/2] \\
-        [--depth 2] [--diff BASE_REF..HEAD_REF]
+        [--depth 2] [--module-depth infinity] [--diff BASE_REF..HEAD_REF]
 
   `--root` may be given multiple times to seed the BFS from several roots,
   and each one is either a module (`MyApp.Accounts`, seeds from every
   function it defines) or one specific function (`MyApp.Accounts.
   create_user/1` — the trailing `/N` arity is what marks it as a function
   rather than a module). Omit `--root` entirely to render the whole
-  project graph unscoped. `--depth` accepts an integer or `infinity`.
-  `--path` is the directory to scan for `.ex` files; defaults to `lib`,
+  project graph unscoped. `--depth` (function-call hops away from the
+  root(s); each row in the graph is one hop, including calls that stay
+  inside the same module) and `--module-depth` (distinct modules crossed
+  on a given path — a call that stays in the current module is free) each
+  accept an integer or `infinity`, and bound the walk independently:
+  `--depth` defaults to `2`, `--module-depth` defaults to `infinity` (no
+  extra cap beyond `--depth` itself). `--path` is the directory to scan
+  for `.ex` files; defaults to `lib`,
   relative to the current project root. It may also be an absolute path
   (or a relative one that escapes the current project, e.g. `../other-
   lib/lib`) to graph another package's source directly, without adding
@@ -39,7 +45,14 @@ defmodule Mix.Tasks.Codegraph do
 
     {opts, _rest, _invalid} =
       OptionParser.parse(args,
-        strict: [port: :integer, path: :string, root: :keep, depth: :string, diff: :string]
+        strict: [
+          port: :integer,
+          path: :string,
+          root: :keep,
+          depth: :string,
+          module_depth: :string,
+          diff: :string
+        ]
       )
 
     port = Keyword.get(opts, :port, 4444)
@@ -50,11 +63,8 @@ defmodule Mix.Tasks.Codegraph do
       |> Keyword.get_values(:root)
       |> Enum.map(&parse_root/1)
 
-    depth =
-      case Keyword.get(opts, :depth, "2") do
-        "infinity" -> :infinity
-        n -> String.to_integer(n)
-      end
+    depth = parse_depth(Keyword.get(opts, :depth, "2"))
+    module_depth = parse_depth(Keyword.get(opts, :module_depth, "infinity"))
 
     diff =
       case Keyword.get(opts, :diff) do
@@ -73,6 +83,7 @@ defmodule Mix.Tasks.Codegraph do
       cwd: File.cwd!(),
       roots: roots,
       depth: depth,
+      module_depth: module_depth,
       diff: diff
     )
 
@@ -104,6 +115,9 @@ defmodule Mix.Tasks.Codegraph do
     Mix.shell().info("codegraph listening on http://localhost:#{port}")
     Process.sleep(:infinity)
   end
+
+  defp parse_depth("infinity"), do: :infinity
+  defp parse_depth(n), do: String.to_integer(n)
 
   # A trailing "/N" (digits only) is treated as an arity, marking this
   # root as one specific function rather than a whole module — module

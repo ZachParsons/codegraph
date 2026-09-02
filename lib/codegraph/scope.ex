@@ -9,16 +9,25 @@ defmodule Codegraph.Scope do
   external boundary nodes are natural BFS leaves since we never analyzed
   their bodies, so they have no outgoing edges to expand into.
 
-  `depth` counts *modules*, not function calls: a call from one function
-  to another in the SAME module costs nothing, so a module's whole
-  internal call structure is included, however many calls deep, as soon
-  as the module itself is in scope. Only a call that crosses into a
-  module not yet seen spends one unit of depth. This is what lets the UI
-  lay every function of a given module out at the same visual depth
-  ("the same box") instead of one row per function-call hop — which is
-  what a naive per-edge depth counter produced: a long intra-module call
-  chain silently ate the whole `depth` budget before the walk ever
-  reached a different module.
+  Two independent depth budgets bound the walk, and a node's `level` (the
+  UI's row/y-position) is its function-call hop count specifically, not
+  its module-hop count — this is what makes the rendered graph an actual
+  call tree (one row per call, including calls that stay inside the same
+  module) rather than collapsing a module's whole internal call chain
+  onto one row:
+
+    * `depth` counts function-call hops: every edge followed, regardless
+      of whether it stays inside the current module or crosses into a
+      new one, spends one unit.
+    * `module_depth` counts *modules*: a call from one function to
+      another in the SAME module costs nothing, only a call that crosses
+      into a module not yet seen on this path spends one unit. It exists
+      purely to cap how far the walk sprawls across unrelated modules —
+      it plays no part in a node's `level`.
+
+  A node reachable within both budgets on some path is included; `level`
+  and the module-hop count are each the value from whichever path first
+  discovers that node (BFS order), same as the rest of this BFS.
 
   One exception: each root's own immediate callers (not the BFS
   descendants' callers, and not the callers' own callers) are looked up
@@ -96,11 +105,12 @@ defmodule Codegraph.Scope do
   @type root :: {:module, module()} | {:function, module(), atom(), non_neg_integer()}
 
   @doc """
-  BFS from `roots` out to `depth` modules away (non-negative integer, or
-  `:infinity` for the full transitive closure) — see the moduledoc for
-  what "modules away" means. Each root is either `{:module, Mod}` (seeds
-  from every function `Mod` defines) or `{:function, Mod, name, arity}`
-  (seeds from just that one function).
+  BFS from `roots` out to `depth` function-call hops away, additionally
+  capped at `module_depth` distinct modules crossed on any given path
+  (each `non_neg_integer() | :infinity`) — see the moduledoc for how the
+  two differ. Each root is either `{:module, Mod}` (seeds from every
+  function `Mod` defines) or `{:function, Mod, name, arity}` (seeds from
+  just that one function).
 
   Preserves call order (the order edges were found in the source, already
   preserved through `project_graph/2`'s merge) in the returned edges/nodes,
@@ -108,20 +118,34 @@ defmodule Codegraph.Scope do
   lets the UI lay out sibling nodes left-to-right in call order instead of
   an arbitrary one.
   """
-  @spec scope(Graph.t(), [root()], non_neg_integer() | :infinity) :: Graph.t()
-  def scope(%Graph{} = graph, roots, depth \\ 2) do
+  @spec scope(Graph.t(), [root()], non_neg_integer() | :infinity, non_neg_integer() | :infinity) :: Graph.t()
+  def scope(%Graph{} = graph, roots, depth \\ 2, module_depth \\ :infinity) do
     root_modules = roots |> Enum.map(&root_module/1) |> MapSet.new()
-
-    module_depth = module_bfs(graph, root_modules, depth)
-    in_scope_modules = module_depth |> Map.keys() |> MapSet.new()
 
     edges_by_from =
       Enum.group_by(graph.edges, fn e -> {e.from.module, e.from.function, e.from.arity} end)
 
-    start = Enum.filter(graph.nodes, fn n -> n.function != nil and matches_root?(n, roots) end)
+    # `not n.external` matters: an external node is an unresolved call
+    # TARGET, not something actually defined in the module (this also
+    # catches the analyzer misattributing an unqualified builtin call —
+    # e.g. `raise(...)`, `is_nil(...)` — to the enclosing module rather
+    # than Kernel). Seeding it as its own root alongside the real root
+    # that calls it would give it two disagreeing hop counts on the same
+    # path (0 as a root, 1 as that root's callee) — whichever it's
+    # assigned first wins, but the other interpretation still leaves a
+    # real edge in the graph, which visibly conflicts with it in the UI.
+    start = Enum.filter(graph.nodes, fn n -> n.function != nil and not n.external and matches_root?(n, roots) end)
 
-    acc = %{node_set: MapSet.new(start), node_list: start, edge_set: MapSet.new(), edge_list: []}
-    acc = bfs(start, edges_by_from, in_scope_modules, acc)
+    acc = %{
+      node_set: MapSet.new(start),
+      node_list: start,
+      edge_set: MapSet.new(),
+      edge_list: [],
+      levels: Map.new(start, &{node_key(&1), 0}),
+      module_hops: Map.new(start, &{node_key(&1), 0})
+    }
+
+    acc = bfs(start, edges_by_from, depth, module_depth, 0, acc)
 
     caller_edges = caller_edges(graph, start, acc.node_set)
     caller_nodes = caller_edges |> Enum.map(& &1.from) |> Enum.uniq()
@@ -132,47 +156,9 @@ defmodule Codegraph.Scope do
     nodes =
       (acc.node_list ++ module_nodes ++ caller_nodes)
       |> Enum.uniq()
-      |> Enum.map(&%{&1 | level: Map.get(module_depth, &1.module)})
+      |> Enum.map(&%{&1 | level: Map.get(acc.levels, node_key(&1))})
 
     %Graph{nodes: nodes, edges: acc.edge_list ++ caller_edges}
-  end
-
-  # BFS over the MODULE graph: an edge `mod_a -> mod_b` exists whenever
-  # some function in `mod_a` calls some function in `mod_b` (same-module
-  # calls never create one). This — not the function call graph itself —
-  # is what `depth` measures, one level per round exactly like the
-  # function-level `bfs/4` below, just counting module hops instead of
-  # call hops. Multiple roots seed multiple BFS sources at once, same as
-  # `bfs/4`, so each module's level is its shortest hop count from
-  # whichever root reaches it first.
-  defp module_bfs(%Graph{} = graph, root_modules, depth) do
-    edges_by_from_module =
-      graph.edges
-      |> Enum.filter(fn e -> e.from.module != e.to.module end)
-      |> Enum.map(fn e -> {e.from.module, e.to.module} end)
-      |> Enum.uniq()
-      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-
-    initial = Map.new(root_modules, &{&1, 0})
-    module_bfs_step(MapSet.to_list(root_modules), edges_by_from_module, depth, 0, initial)
-  end
-
-  defp module_bfs_step(_frontier, _edges_by_from_module, depth, _level, acc) when depth <= 0, do: acc
-  defp module_bfs_step([], _edges_by_from_module, _depth, _level, acc), do: acc
-
-  defp module_bfs_step(frontier, edges_by_from_module, depth, level, acc) do
-    next_level = level + 1
-
-    discovered =
-      frontier
-      |> Enum.flat_map(fn m -> Map.get(edges_by_from_module, m, []) end)
-      |> Enum.uniq()
-      |> Enum.reject(&Map.has_key?(acc, &1))
-
-    acc = Enum.reduce(discovered, acc, &Map.put(&2, &1, next_level))
-    next_depth = if depth == :infinity, do: :infinity, else: depth - 1
-
-    module_bfs_step(discovered, edges_by_from_module, next_depth, next_level, acc)
   end
 
   # One hop backward from each root function only (not from BFS
@@ -206,25 +192,46 @@ defmodule Codegraph.Scope do
     end)
   end
 
-  # Unbounded, once module_bfs above has already decided WHICH modules are
-  # in scope: an edge is followed only if its target's module made the
-  # cut, with no separate hop limit here — a module that's in scope is
-  # shown in full, however many function-call hops its own internal
-  # structure spans.
-  defp bfs([], _edges_by_from, _in_scope_modules, acc), do: acc
+  # One round per function-call hop (`depth` is the round budget, `round`
+  # the hop count so far — this becomes each newly discovered node's
+  # `level`). An edge is additionally dropped when following it would
+  # cross `module_depth` distinct modules on this path: `module_hops`
+  # tracks, per already-discovered node, the module-crossing count of
+  # whichever path discovered it first, and a same-module edge inherits
+  # its source's count unchanged while a cross-module edge adds one.
+  defp bfs([], _edges_by_from, _depth, _module_depth, _round, acc), do: acc
+  defp bfs(_frontier, _edges_by_from, depth, _module_depth, _round, acc) when depth <= 0, do: acc
 
-  defp bfs(frontier, edges_by_from, in_scope_modules, acc) do
-    new_edges =
+  defp bfs(frontier, edges_by_from, depth, module_depth, round, acc) do
+    next_round = round + 1
+
+    candidate_edges =
       frontier
       |> Enum.flat_map(fn n -> Map.get(edges_by_from, {n.module, n.function, n.arity}, []) end)
       |> Enum.uniq()
       |> Enum.reject(&MapSet.member?(acc.edge_set, &1))
-      |> Enum.filter(&MapSet.member?(in_scope_modules, &1.to.module))
+
+    {new_edges, module_hops} =
+      Enum.reduce(candidate_edges, {[], acc.module_hops}, fn e, {kept, hops} ->
+        from_hops = Map.fetch!(hops, node_key(e.from))
+        to_hops = if e.from.module == e.to.module, do: from_hops, else: from_hops + 1
+
+        if to_hops <= module_depth do
+          to_key = node_key(e.to)
+          hops = if Map.has_key?(hops, to_key), do: hops, else: Map.put(hops, to_key, to_hops)
+          {[e | kept], hops}
+        else
+          {kept, hops}
+        end
+      end)
+
+    new_edges = Enum.reverse(new_edges)
 
     acc = %{
       acc
       | edge_set: Enum.reduce(new_edges, acc.edge_set, &MapSet.put(&2, &1)),
-        edge_list: acc.edge_list ++ new_edges
+        edge_list: acc.edge_list ++ new_edges,
+        module_hops: module_hops
     }
 
     new_nodes =
@@ -236,12 +243,14 @@ defmodule Codegraph.Scope do
     acc = %{
       acc
       | node_set: Enum.reduce(new_nodes, acc.node_set, &MapSet.put(&2, &1)),
-        node_list: acc.node_list ++ new_nodes
+        node_list: acc.node_list ++ new_nodes,
+        levels: Enum.reduce(new_nodes, acc.levels, &Map.put(&2, node_key(&1), next_round))
     }
 
     next_frontier = Enum.reject(new_nodes, & &1.external)
+    next_depth = if depth == :infinity, do: :infinity, else: depth - 1
 
-    bfs(next_frontier, edges_by_from, in_scope_modules, acc)
+    bfs(next_frontier, edges_by_from, next_depth, module_depth, next_round, acc)
   end
 
   defp resolve_edge(%Edge{} = edge, defined_functions) do

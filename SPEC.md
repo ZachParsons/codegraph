@@ -57,17 +57,24 @@ The user specifies a **root module** (or several) and a **depth**; the tool
 does a BFS over the call graph from the root(s) — outgoing edges (what the
 root calls), and optionally incoming edges (what calls the root) — up to that
 depth, and everything reached becomes the visualized component. Depth counts
-**modules**, not function calls: a call from one function to another in the
-same module costs nothing, so a module's whole internal call structure is
-included, however many calls deep, once the module itself is in scope — only
-a call that crosses into a module not yet seen spends one unit of depth.
-Depth 0 = just the root module's own functions (its full internal call
-graph, but no other module); unset/unbounded depth = full transitive closure
-(bounded practically by hitting external-boundary nodes, see below).
+**function-call hops**: every call followed spends one unit, whether or not
+it stays inside the current module — this is what a node's row in the
+rendered tree reflects, so a long in-module call chain still reads as several
+rows, not one. Depth 0 = just the root function(s) themselves; unset/
+unbounded depth = full transitive closure (bounded practically by hitting
+external-boundary nodes, see below).
+
+A second, independent budget, **module depth**, counts distinct *modules*
+crossed on a given path instead — a call that stays in the current module is
+free, only a call into a module not yet seen on that path spends one unit.
+It exists purely to cap how far the walk sprawls across unrelated modules,
+regardless of how many function-call hops that takes; it has no effect on a
+node's row. Unset/unbounded module depth (the default) applies no extra cap
+beyond depth itself.
 
 ```
-mix codegraph --root MyApp.Accounts --depth 2
-mix codegraph --root MyApp.Accounts --root MyApp.Billing --depth 1
+mix codegraph --root MyApp.Accounts --depth 4
+mix codegraph --root MyApp.Accounts --root MyApp.Billing --depth 6 --module-depth 2
 ```
 
 ## Graph model

@@ -40,8 +40,8 @@ defmodule Codegraph.ScopeTest do
     assert Enum.any?(depth2.nodes, &(&1.module == C and &1.function == :deep))
   end
 
-  test "depth counts modules, not function calls: an intra-module chain costs nothing" do
-    dir = Path.join(System.tmp_dir!(), "codegraph_scope_module_depth_#{System.unique_integer([:positive])}")
+  test "depth counts function-call hops, including hops that stay inside one module" do
+    dir = Path.join(System.tmp_dir!(), "codegraph_scope_depth_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
 
@@ -64,16 +64,58 @@ defmodule Codegraph.ScopeTest do
     graph = Scope.project_graph(["*.ex"], dir)
 
     depth0 = Scope.scope(graph, [{:function, Root, :entry, 1}], 0)
-    # Every function of Root is reachable purely through same-module calls,
-    # so all of it is included at depth 0 despite being 3 calls deep.
-    assert Enum.any?(depth0.nodes, &(&1.module == Root and &1.function == :step_c))
-    refute Enum.any?(depth0.nodes, &(&1.module == Other))
-    assert Enum.all?(depth0.nodes, &(&1.level == 0))
+    # entry itself is level 0; step_a is one call away, past the depth-0
+    # budget, even though it never leaves Root.
+    refute Enum.any?(depth0.nodes, &(&1.module == Root and &1.function == :step_a))
 
-    depth1 = Scope.scope(graph, [{:function, Root, :entry, 1}], 1)
-    other_leaf = Enum.find(depth1.nodes, &(&1.module == Other and &1.function == :leaf))
+    depth3 = Scope.scope(graph, [{:function, Root, :entry, 1}], 3)
+    # Three calls (entry -> step_a -> step_b -> step_c) reaches step_c, each
+    # one spending depth despite staying inside Root the whole way; level is
+    # its own hop count, not a module-crossing count.
+    step_c = Enum.find(depth3.nodes, &(&1.module == Root and &1.function == :step_c))
+    assert step_c
+    assert step_c.level == 3
+    refute Enum.any?(depth3.nodes, &(&1.module == Other))
+
+    depth4 = Scope.scope(graph, [{:function, Root, :entry, 1}], 4)
+    other_leaf = Enum.find(depth4.nodes, &(&1.module == Other and &1.function == :leaf))
     assert other_leaf
-    assert other_leaf.level == 1
+    assert other_leaf.level == 4
+  end
+
+  test "module_depth independently caps modules crossed, without affecting level" do
+    dir = Path.join(System.tmp_dir!(), "codegraph_scope_module_depth_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    File.write!(Path.join(dir, "root.ex"), """
+    defmodule Root do
+      def entry(x), do: A.step(x)
+    end
+
+    defmodule A do
+      def step(x), do: B.step(x)
+    end
+
+    defmodule B do
+      def step(x), do: x
+    end
+    """)
+
+    graph = Scope.project_graph(["*.ex"], dir)
+
+    # Plenty of function-call depth, but capped at 1 module crossing: A is
+    # reached (entry -> A crosses one module), B is not (A -> B would be a
+    # second crossing).
+    scoped = Scope.scope(graph, [{:function, Root, :entry, 1}], 10, 1)
+    a_step = Enum.find(scoped.nodes, &(&1.module == A and &1.function == :step))
+    assert a_step
+    # level is still the function-call hop count (1), not the module count.
+    assert a_step.level == 1
+    refute Enum.any?(scoped.nodes, &(&1.module == B))
+
+    unbounded = Scope.scope(graph, [{:function, Root, :entry, 1}], 10, 2)
+    assert Enum.any?(unbounded.nodes, &(&1.module == B and &1.function == :step))
   end
 
   test "a function root seeds from just that function, not the whole module" do
@@ -97,6 +139,35 @@ defmodule Codegraph.ScopeTest do
     assert caller_edge
     assert caller_edge.from.module == A
     assert caller_edge.from.function == :entry
+  end
+
+  test "an external node isn't seeded as its own root just because it shares a root module's name" do
+    dir = Path.join(System.tmp_dir!(), "codegraph_scope_external_root_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    # `helper(x)` is unqualified and never defined anywhere, so the
+    # analyzer attributes the call to the enclosing module (Root) even
+    # though it's really an unresolved external target — the same
+    # misattribution real code hits for an unqualified builtin call like
+    # `raise(...)` or `is_nil(...)`.
+    File.write!(Path.join(dir, "root.ex"), """
+    defmodule Root do
+      def entry(x), do: helper(x)
+    end
+    """)
+
+    graph = Scope.project_graph(["*.ex"], dir)
+    scoped = Scope.scope(graph, [{:module, Root}], 5)
+
+    entry = Enum.find(scoped.nodes, &(&1.module == Root and &1.function == :entry))
+    helper = Enum.find(scoped.nodes, &(&1.module == Root and &1.function == :helper))
+    assert entry.level == 0
+    # helper/1 is external (never defined) and matches root module Root
+    # by name, but it must only be reached as entry's callee (level 1),
+    # never independently seeded as its own level-0 root.
+    assert helper.external
+    assert helper.level == 1
   end
 
   test "a root with no callers gets no caller edges" do

@@ -9,9 +9,10 @@ defmodule Codegraph.Web.GraphLive do
     cwd = Keyword.get(opts, :cwd, File.cwd!())
     roots = Keyword.get(opts, :roots, [])
     depth = Keyword.get(opts, :depth, 2)
+    module_depth = Keyword.get(opts, :module_depth, :infinity)
     diff = Keyword.get(opts, :diff)
 
-    graph = build_graph(diff, globs, cwd, roots, depth)
+    graph = build_graph(diff, globs, cwd, roots, depth, module_depth)
 
     graph_json =
       Jason.encode!(%{
@@ -29,19 +30,19 @@ defmodule Codegraph.Web.GraphLive do
      )}
   end
 
-  defp build_graph(nil, globs, cwd, roots, depth) do
+  defp build_graph(nil, globs, cwd, roots, depth, module_depth) do
     project = Scope.project_graph(globs, cwd)
-    scoped(project, roots, depth)
+    scoped(project, roots, depth, module_depth)
   end
 
-  defp build_graph({ref_a, ref_b}, globs, cwd, roots, depth) do
-    graph_a = Scope.project_graph_at(ref_a, globs, cwd) |> scoped(roots, depth)
-    graph_b = Scope.project_graph_at(ref_b, globs, cwd) |> scoped(roots, depth)
+  defp build_graph({ref_a, ref_b}, globs, cwd, roots, depth, module_depth) do
+    graph_a = Scope.project_graph_at(ref_a, globs, cwd) |> scoped(roots, depth, module_depth)
+    graph_b = Scope.project_graph_at(ref_b, globs, cwd) |> scoped(roots, depth, module_depth)
     Diff.diff(graph_a, graph_b)
   end
 
-  defp scoped(project, [], _depth), do: project
-  defp scoped(project, roots, depth), do: Scope.scope(project, roots, depth)
+  defp scoped(project, [], _depth, _module_depth), do: project
+  defp scoped(project, roots, depth, module_depth), do: Scope.scope(project, roots, depth, module_depth)
 
   def render(assigns) do
     ~H"""
@@ -62,8 +63,8 @@ defmodule Codegraph.Web.GraphLive do
           <span><span style={legend_dot("#f85149")}></span> removed</span>
           <span><span style={legend_dot("#d29922")}></span> modified</span>
         </div>
-        <div :if={@roots != []} style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8rem;">
-          <span><span style={legend_dot("#7c6fd6")}></span> caller (one level up)</span>
+        <div :if={@roots != []} style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8rem; opacity: 0.6;">
+          <span><span style={legend_dot("#5a5a66")}></span> caller (one level up, implicit)</span>
         </div>
       </header>
       <div id="graph" phx-hook="GraphViz" phx-update="ignore" data-graph={@graph_json}></div>
