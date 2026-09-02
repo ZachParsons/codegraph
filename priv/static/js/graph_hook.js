@@ -66,6 +66,8 @@ var CG_STATUS_COLOR = {
   modified: "#d29922",
 };
 
+var CG_CALLER_EDGE_COLOR = "#7c6fd6"; // distinguishes a caller edge (pointing into the root from above) from a regular descendant edge
+
 var CG_BADGE_GAP = 34; // vertical gap between a module's badge and its topmost node
 
 // Escape clears both node selection and any active browser text
@@ -108,6 +110,28 @@ function cgRenderGraph(container, data) {
       nodesById[cgNodeId(n)] = n;
     });
 
+  // Caller edges (kind "caller", added by Codegraph.Scope for each root's
+  // own immediate callers) never enter d3-dag's graph: they're not part
+  // of the downward call tree sugiyama lays out, and a node reachable
+  // ONLY via a caller edge shouldn't be pre-registered there either — the
+  // upfront registration pass below exists to catch nodes with zero
+  // edges at all (e.g. a depth-0 root), and pre-registering a caller-only
+  // node the same way would let it fall into visitForTree's "no incoming
+  // edge -> treat as its own root" fallback, wasting horizontal space in
+  // the top row reserved for a node that's about to be repositioned above
+  // the tree anyway (see the caller-layout pass below). A node counts as
+  // caller-only only if EVERY edge touching it is a caller edge — a node
+  // that's legitimately both keeps its normal spot.
+  var callerOnlyIds = new Set();
+  data.edges.forEach(function (e) {
+    if (e.kind === "caller") callerOnlyIds.add(cgNodeId(e.from));
+  });
+  data.edges.forEach(function (e) {
+    if (e.kind === "caller") return;
+    callerOnlyIds.delete(cgNodeId(e.from));
+    callerOnlyIds.delete(cgNodeId(e.to));
+  });
+
   var graph = d3.graph();
   var built = {};
   function ensureNode(n) {
@@ -118,17 +142,26 @@ function cgRenderGraph(container, data) {
   }
   data.nodes
     .filter(function (n) {
-      return n.function;
+      return n.function && !callerOnlyIds.has(cgNodeId(n));
     })
     .forEach(ensureNode);
 
-  var edgeList = []; // {fromId, toId, status}
+  var edgeList = []; // {fromId, toId, status, kind} — feeds sugiyama + the downward tidy tree
+  var callerEdgeList = []; // kind "caller" — laid out separately, one level above the root(s)
   data.edges.forEach(function (e) {
-    var a = ensureNode(e.from);
-    var b = ensureNode(e.to);
     var fromId = cgNodeId(e.from);
     var toId = cgNodeId(e.to);
-    edgeList.push({ fromId: fromId, toId: toId, status: e.status });
+    if (!nodesById[fromId]) nodesById[fromId] = e.from;
+    if (!nodesById[toId]) nodesById[toId] = e.to;
+
+    if (e.kind === "caller") {
+      callerEdgeList.push({ fromId: fromId, toId: toId, status: e.status, kind: e.kind });
+      return;
+    }
+
+    var a = ensureNode(e.from);
+    var b = ensureNode(e.to);
+    edgeList.push({ fromId: fromId, toId: toId, status: e.status, kind: e.kind });
     // d3-dag's sugiyama layout requires a DAG; a self-call (recursion) would
     // be a self-loop, which isn't a valid DAG edge, so it's dropped here —
     // the node itself still renders, just without a self-referencing arrow.
@@ -164,9 +197,19 @@ function cgRenderGraph(container, data) {
   // by every draw call below, so dragging and overlap resolution can move
   // nodes freely without needing to touch the underlying d3-dag layout.
   //
-  // Layer (depth) assignment comes from sugiyama: correctly handling
-  // arbitrary DAG topology (nodes reachable via more than one path, etc.)
-  // is genuinely hard to get right by hand, so that part is kept.
+  // Layer (depth) assignment normally comes from sugiyama: correctly
+  // handling arbitrary DAG topology (nodes reachable via more than one
+  // path, etc.) is genuinely hard to get right by hand, so that part is
+  // kept as the fallback for the unscoped (no --root) whole-project view,
+  // where there's no notion of "modules away from a root" to draw on.
+  // Whenever a node DOES carry a `level` (Codegraph.Scope.scope/3's own
+  // module-hop BFS — see its moduledoc), that's used instead: sugiyama's
+  // layer is one row per function-CALL hop, which put a module's own
+  // internal call chain on several different rows even though none of it
+  // ever left the module — `level` instead gives every function in a
+  // module the same row, and only advances a row when a call actually
+  // crosses into a different module.
+  //
   // Horizontal position within a layer does NOT come from sugiyama — its
   // own x is purely an edge-crossing-minimization heuristic with no
   // relationship to the source code (confirmed: neither call order nor
@@ -177,8 +220,10 @@ function cgRenderGraph(container, data) {
   var pos = {};
   var nodeLayer = {};
   Array.from(graph.nodes()).forEach(function (n) {
-    pos[n.data] = { x: 0, y: n.y };
-    nodeLayer[n.data] = n.y;
+    var info = nodesById[n.data];
+    var layer = info && info.level != null ? info.level : n.y;
+    pos[n.data] = { x: 0, y: layer };
+    nodeLayer[n.data] = layer;
   });
 
   // A fixed per-level pixel gap either wastes the viewport (few levels)
@@ -416,6 +461,74 @@ function cgRenderGraph(container, data) {
     });
   });
 
+  // Callers of the root(s) — exactly one generation, never fed through
+  // sugiyama or the downward contour merge above (see callerOnlyIds) —
+  // get their own row placed directly above the root they call, entirely
+  // by hand: pack each root's callers into a row centered on that root's
+  // now-final x, in call order, then resolve left-right overlap BETWEEN
+  // different roots' caller rows by shifting a later row rightward. A
+  // root's own x never moves for this, only its callers shift, so a
+  // crowded caller row can end up off-center under its root — an
+  // acceptable trade-off for leaving the already-finalized downward tree
+  // layout completely undisturbed by this separate upward pass. A caller
+  // shared by more than one root is placed once, under whichever root
+  // claims it first.
+  var callersByRoot = {};
+  var callerClaimedBy = {};
+  callerEdgeList.forEach(function (e) {
+    if (!pos[e.toId] || callerClaimedBy[e.fromId] !== undefined) return;
+    callerClaimedBy[e.fromId] = e.toId;
+    (callersByRoot[e.toId] = callersByRoot[e.toId] || []).push(e.fromId);
+  });
+
+  var callerRows = Object.keys(callersByRoot).map(function (rootId) {
+    var callerIds = callersByRoot[rootId];
+    var widths = callerIds.map(function (id) {
+      return Math.max(cgLabelWidth(nodesById[id]), 120);
+    });
+    var totalWidth =
+      widths.reduce(function (a, b) {
+        return a + b;
+      }, 0) +
+      TREE_GAP * (callerIds.length - 1);
+    var startX = pos[rootId].x - totalWidth / 2;
+    var xs = [];
+    var cursor = startX;
+    widths.forEach(function (w) {
+      xs.push(cursor + w / 2);
+      cursor += w + TREE_GAP;
+    });
+    return {
+      callerIds: callerIds,
+      xs: xs,
+      y: pos[rootId].y - levelSpacing,
+      left: startX,
+      right: cursor - TREE_GAP,
+    };
+  });
+
+  callerRows.sort(function (a, b) {
+    return a.left - b.left;
+  });
+  var callerRowPrevRight = -Infinity;
+  callerRows.forEach(function (row) {
+    var shift = Math.max(0, callerRowPrevRight + TREE_GAP - row.left);
+    if (shift > 0) {
+      row.xs = row.xs.map(function (x) {
+        return x + shift;
+      });
+      row.left += shift;
+      row.right += shift;
+    }
+    callerRowPrevRight = row.right;
+  });
+
+  callerRows.forEach(function (row) {
+    row.callerIds.forEach(function (id, i) {
+      pos[id] = { x: row.xs[i], y: row.y };
+    });
+  });
+
   var byModuleIds = {};
   Object.keys(nodesById).forEach(function (id) {
     if (!pos[id]) return; // external node with no position (shouldn't happen for function nodes)
@@ -592,10 +705,11 @@ function cgRenderGraph(container, data) {
 
   var edgePaths = edgeLayer
     .selectAll("path")
-    .data(edgeList)
+    .data(edgeList.concat(callerEdgeList))
     .join("path")
     .attr("fill", "none")
     .attr("stroke", function (e) {
+      if (e.kind === "caller") return CG_CALLER_EDGE_COLOR;
       return CG_STATUS_COLOR[e.status] || "#8a8a92";
     })
     .attr("stroke-width", function (e) {

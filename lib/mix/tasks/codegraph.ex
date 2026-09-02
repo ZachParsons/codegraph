@@ -1,9 +1,9 @@
-defmodule Mix.Tasks.Codegraph.Serve do
+defmodule Mix.Tasks.Codegraph do
   @shortdoc "Starts the codegraph web UI"
   @moduledoc """
   Starts the codegraph web UI against the current project.
 
-      mix codegraph.serve [--port 4444] [--path lib] \\
+      mix codegraph [--port 4444] [--path lib] \\
         [--root MyApp.Accounts] [--root MyApp.Billing.create_invoice/2] \\
         [--depth 2] [--diff BASE_REF..HEAD_REF]
 

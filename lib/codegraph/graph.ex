@@ -6,7 +6,15 @@ defmodule Codegraph.Graph do
   """
 
   defmodule Node do
-    @moduledoc "A function node, or the module it belongs to (`function: nil`)."
+    @moduledoc """
+    A function node, or the module it belongs to (`function: nil`).
+
+    `level` is `nil` until `Codegraph.Scope.scope/3` sets it: the number of
+    *modules* (not function calls) between this node's module and the
+    nearest root module, used by the UI to lay callers of the same module
+    out at the same visual depth regardless of how many calls deep their
+    own internal call structure goes.
+    """
     defstruct [
       :module,
       :function,
@@ -16,7 +24,8 @@ defmodule Codegraph.Graph do
       :hash,
       :params,
       :spec_args,
-      :spec_return
+      :spec_return,
+      :level
     ]
 
     @type t :: %__MODULE__{
@@ -28,18 +37,20 @@ defmodule Codegraph.Graph do
             hash: integer() | nil,
             params: [String.t()] | nil,
             spec_args: [String.t()] | nil,
-            spec_return: String.t() | nil
+            spec_return: String.t() | nil,
+            level: non_neg_integer() | nil
           }
   end
 
   defmodule Edge do
     @moduledoc "A directed call edge between two fully-qualified function nodes."
-    defstruct [:from, :to, :status]
+    defstruct [:from, :to, :status, kind: :call]
 
     @type t :: %__MODULE__{
             from: Codegraph.Graph.Node.t(),
             to: Codegraph.Graph.Node.t(),
-            status: :added | :removed | :unchanged
+            status: :added | :removed | :unchanged,
+            kind: :call | :caller
           }
   end
 

@@ -6,7 +6,7 @@ end-to-end, not just one layer deeper. See SPEC.md for design details.
 ## Foundation
 
 - [x] Scaffold mix project + git repo
-- [x] Boot `mix codegraph.serve` (empty Phoenix/LiveView shell)
+- [x] Boot `mix codegraph` (empty Phoenix/LiveView shell)
 
 ## Single-tree view (use case 1)
 
@@ -27,7 +27,7 @@ end-to-end, not just one layer deeper. See SPEC.md for design details.
 ## Hardening / polish
 
 - [ ] Optional `mix xref` enrichment pass for the current compiled revision
-- [x] Dogfood: add as a dep to a real external repo, verify `mix codegraph.serve` there
+- [x] Dogfood: add as a dep to a real external repo, verify `mix codegraph` there
 - [x] Handle indirect/dynamic calls gracefully (mark unresolved, don't crash)
 
 ## Later (not yet scheduled)

@@ -62,6 +62,9 @@ defmodule Codegraph.Web.GraphLive do
           <span><span style={legend_dot("#f85149")}></span> removed</span>
           <span><span style={legend_dot("#d29922")}></span> modified</span>
         </div>
+        <div :if={@roots != []} style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8rem;">
+          <span><span style={legend_dot("#7c6fd6")}></span> caller (one level up)</span>
+        </div>
       </header>
       <div id="graph" phx-hook="GraphViz" phx-update="ignore" data-graph={@graph_json}></div>
     </div>
@@ -84,11 +87,12 @@ defmodule Codegraph.Web.GraphLive do
       status: n.status,
       params: n.params,
       spec_args: n.spec_args,
-      spec_return: n.spec_return
+      spec_return: n.spec_return,
+      level: n.level
     }
   end
 
   defp edge_json(e) do
-    %{from: node_json(e.from), to: node_json(e.to), status: e.status}
+    %{from: node_json(e.from), to: node_json(e.to), status: e.status, kind: e.kind}
   end
 end
