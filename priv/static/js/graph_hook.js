@@ -404,6 +404,20 @@ function cgRenderGraph(container, data) {
   // per-layer values so gaps don't need explicit padding.
   var TREE_GAP = 24;
 
+  // A box's DRAWN rectangle (see boxRect further down) is its content
+  // plus this padding on every side (BOX_PAD_TOP is taller, to leave
+  // room for the module-name label at the top). Defined here — not down
+  // by boxRect itself — because layoutBox below must reserve exactly
+  // this much extra space during layout too: reserving only the raw
+  // content width and padding just the DRAWING left every box's actual
+  // rectangle several pixels wider than what TREE_GAP had set aside for
+  // it, so adjacent boxes' drawn rectangles overlapped even though their
+  // underlying node positions never did.
+  var BOX_PAD_X = 10;
+  var BOX_PAD_TOP = 26;
+  var BOX_PAD_BOTTOM = 10;
+  var NODE_HALF_ROW = 28; // half a node's own rendered height (circle + multi-line label)
+
   // Shared by layoutBoxLocal/layoutBox below (and by the root-level merge
   // further down): places `childLayouts` left to right, shifting each one
   // just far enough right that, at every ABSOLUTE layer where it and
@@ -444,7 +458,12 @@ function cgRenderGraph(container, data) {
   // per-layer left/right silhouette — used by layoutBox below to derive
   // its overall reserved width.
   function layoutBoxLocal(id) {
-    var ownHalf = cgLabelWidth(nodesById[id]) / 2;
+    // Floored at 120 to match boxRect's own per-node minimum further
+    // down — reserving only the raw (unfloored) label width here left
+    // short-labeled nodes (an external leaf like "each/2", say) with a
+    // narrower reservation than the rectangle boxRect actually draws
+    // for them, so two short-labeled sibling boxes could still overlap.
+    var ownHalf = Math.max(cgLabelWidth(nodesById[id]), 120) / 2;
     var myLayer = nodeLayer[id];
     var kids = (treeChildrenOf[id] || []).filter(function (c) {
       return boxOf[c] === boxOf[id];
@@ -516,10 +535,19 @@ function cgRenderGraph(container, data) {
         return local.rightContour[l];
       })
     );
-    // The box's own label can be wider than its content (see
-    // cgBoxLabelWidth) — reserve for that too, growing only to the
-    // right, matching how boxRect below draws it (left edge fixed).
-    boxRight = Math.max(boxRight, boxLeft + cgBoxLabelWidth(nodesById[boxId].module));
+    // Reserve exactly what boxRect below will actually draw: content
+    // padded by BOX_PAD_X on both sides, widened further on the right if
+    // the box's own label (which can be wider than its content — see
+    // cgBoxLabelWidth) needs more room than that. Reserving only the raw
+    // content width here — leaving BOX_PAD_X to be added purely at draw
+    // time — left every drawn rectangle wider than what TREE_GAP had
+    // actually set aside for it, so adjacent boxes' rectangles
+    // overlapped even where the underlying node positions didn't.
+    var labelWidth = cgBoxLabelWidth(nodesById[boxId].module);
+    var contentLeft = boxLeft;
+    var contentRight = boxRight;
+    boxLeft = contentLeft - BOX_PAD_X;
+    boxRight = Math.max(contentRight + BOX_PAD_X, contentLeft + labelWidth);
 
     var exitBoxIds = [];
     boxMembers[boxId].forEach(function (memberId) {
@@ -702,15 +730,11 @@ function cgRenderGraph(container, data) {
   // the single global floating label this replaced) — that's only
   // possible now because box assignment (above) already keeps a
   // same-module chain visually contiguous, and the box-aware contour
-  // layout already reserves enough space that nothing else lands inside
-  // it. Estimated (not DOM-measured) label width, so this can run before
-  // any SVG text exists — used both for the initial viewport sizing
+  // layout already reserves enough space (including this same padding —
+  // see BOX_PAD_X et al above) that nothing else lands inside it.
+  // Estimated (not DOM-measured) label width, so this can run before any
+  // SVG text exists — used both for the initial viewport sizing
   // (contentExtent below) and every redraw.
-  var BOX_PAD_X = 10;
-  var BOX_PAD_TOP = 26;
-  var BOX_PAD_BOTTOM = 10;
-  var NODE_HALF_ROW = 28; // half a node's own rendered height (circle + multi-line label)
-
   function boxRect(boxId) {
     var minX = Infinity,
       maxX = -Infinity,
