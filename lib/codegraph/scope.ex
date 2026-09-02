@@ -32,15 +32,17 @@ defmodule Codegraph.Scope do
   alias Codegraph.Graph.Edge
 
   @doc """
-  Analyze every file matched by `globs` (relative to `cwd`) on disk and
-  merge into one project-wide graph with `external` resolved on every
-  node/edge.
+  Analyze every file matched by `globs` on disk and merge into one
+  project-wide graph with `external` resolved on every node/edge. Each
+  glob is resolved against `cwd` via `Path.expand/2`, so a relative glob
+  (the common case) is scoped under `cwd` while an absolute one (e.g. a
+  `--path` pointing at another package entirely) is used as-is.
   """
   @spec project_graph([String.t()], String.t()) :: Graph.t()
   def project_graph(globs \\ ["lib/**/*.ex"], cwd \\ File.cwd!()) do
     files =
       globs
-      |> Enum.flat_map(&Path.wildcard(Path.join(cwd, &1)))
+      |> Enum.flat_map(&Path.wildcard(Path.expand(&1, cwd)))
       |> Enum.uniq()
 
     files |> Enum.map(&Analyzer.analyze_file/1) |> merge()

@@ -15,6 +15,15 @@ defmodule Codegraph.ScopeTest do
     assert enum_map.external == true
   end
 
+  test "project_graph accepts an absolute glob, ignoring cwd" do
+    absolute_glob = Path.join(@fixtures, "*.ex")
+
+    graph = Scope.project_graph([absolute_glob], "/nonexistent/cwd")
+
+    b_step = Enum.find(graph.nodes, &(&1.module == B and &1.function == :step))
+    assert b_step.external == false
+  end
+
   test "scope BFS respects depth and stops at external boundary nodes" do
     graph = Scope.project_graph(["*.ex"], @fixtures)
 

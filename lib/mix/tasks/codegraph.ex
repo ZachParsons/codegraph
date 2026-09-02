@@ -13,9 +13,16 @@ defmodule Mix.Tasks.Codegraph do
   create_user/1` — the trailing `/N` arity is what marks it as a function
   rather than a module). Omit `--root` entirely to render the whole
   project graph unscoped. `--depth` accepts an integer or `infinity`.
-  `--path` is the directory to scan for `.ex` files (relative to the
-  current project root); defaults to `lib`. `--diff` renders the diff
-  between two git refs (e.g. `main..HEAD`) instead of the working tree.
+  `--path` is the directory to scan for `.ex` files; defaults to `lib`,
+  relative to the current project root. It may also be an absolute path
+  (or a relative one that escapes the current project, e.g. `../other-
+  lib/lib`) to graph another package's source directly, without adding
+  codegraph as a dependency there — analysis is pure static parsing, so
+  the target package need not be fetched, compiled, or even be a Mix
+  project. `--diff` renders the diff between two git refs (e.g.
+  `main..HEAD`) instead of the working tree, and requires `--path` to
+  stay relative and inside the current git repo (it walks git history,
+  not the filesystem).
   """
   use Mix.Task
 
