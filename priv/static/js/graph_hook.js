@@ -271,26 +271,25 @@ function cgRenderGraph(container, data) {
     pos[id].y = (nodeLayer[id] + 0.5) * levelSpacing;
   });
 
-  // Tidy-tree horizontal placement: nodes are first grouped into "boxes" —
-  // a box is a maximal run of directly-connected same-module nodes along
-  // the spanning tree (a straight chain, or a small branching sub-tree,
-  // all in one module) — then BOXES, not individual nodes, are the units
-  // a Reingold-Tilford-with-contour-merge places left to right, each
-  // parent box centered over its own child boxes with no overlap. A
-  // module whose functions appear in several disconnected places in the
-  // call tree gets several separate boxes, one per occurrence — there's
-  // no single global "the Foo module" region, only wherever a same-module
-  // chain actually occurs, which is also what lets a widely-shared callee
-  // (a stdlib helper, say) stay a single node with multiple incoming
-  // edges rather than needing to be duplicated per caller.
+  // Tidy-tree horizontal placement: nodes are grouped into "boxes" keyed
+  // by MODULE — every node belonging to a module is a member of that
+  // module's ONE box, wherever in the call tree it's reached from, so a
+  // module never splits into several visual locations even when its own
+  // functions are structurally unrelated (never call each other, or are
+  // only reachable via completely different subtrees). Boxes, not
+  // individual nodes, are the units a Reingold-Tilford-with-contour-merge
+  // places left to right, each parent box centered over its own child
+  // boxes with no overlap.
   //
   // A general DAG isn't a tree, though (a node can have more than one
   // caller) — so this first picks ONE spanning tree out of it via DFS
   // from the layer-0 roots, in call order (edgeList's order): a node
   // reached by more than one caller is positioned under whichever
-  // caller's DFS found it first (and so belongs to whichever box that
-  // caller occurs in), and its OTHER callers still get their edge drawn
-  // to wherever it ends up, without influencing that position themselves.
+  // caller's DFS found it first, and its OTHER callers still get their
+  // edge drawn to wherever it ends up, without influencing that position
+  // themselves. A widely-shared callee (a stdlib helper, say) stays a
+  // single node with multiple incoming edges rather than being
+  // duplicated per caller — this is exactly what makes that possible.
   var childrenOf = {};
   edgeList.forEach(function (e) {
     if (!pos[e.fromId] || !pos[e.toId] || e.fromId === e.toId) return;
@@ -343,24 +342,77 @@ function cgRenderGraph(container, data) {
     visitForTree(id, undefined); // any node not reached from a layer-0 root becomes its own root
   });
 
-  // Box assignment: walk the spanning tree top-down; a node continues its
-  // parent's box when they're in the same module, otherwise it starts a
-  // new one. `boxMembers` is in DFS/call order, matching edgeList's own
-  // order (see the note above on why that matters for layout).
+  // Box assignment: a node's box IS its module — no walk needed, just
+  // group by the field every node already carries. Membership is
+  // recorded by walking the spanning tree instead of iterating nodeLayer
+  // directly, purely to keep `boxMembers` in call order (matching
+  // edgeList's own order — see the note above on why that matters for
+  // layout).
   var boxOf = {};
   var boxMembers = {};
-  function assignBox(id, currentBox) {
-    var sameModuleAsParent =
-      parentOf[id] !== undefined && nodesById[id].module === nodesById[parentOf[id]].module;
-    var box = sameModuleAsParent ? currentBox : id;
-    boxOf[id] = box;
-    (boxMembers[box] = boxMembers[box] || []).push(id);
-    (treeChildrenOf[id] || []).forEach(function (childId) {
-      assignBox(childId, box);
+  treeRoots.forEach(function (rootId) {
+    (function walk(id) {
+      var mod = nodesById[id].module;
+      boxOf[id] = mod;
+      (boxMembers[mod] = boxMembers[mod] || []).push(id);
+      (treeChildrenOf[id] || []).forEach(walk);
+    })(rootId);
+  });
+
+  // Within its one box, a module's members can still be scattered across
+  // several unrelated subtrees (structurally: no calls between them, or
+  // only reachable via completely different callers) — each such member
+  // is a "local root" of the module's own internal layout: its spanning-
+  // tree parent is either absent or in a different module. A module with
+  // several local roots lays each out separately (via layoutBoxLocal,
+  // restricted to same-module descendants — its `kids` filter already
+  // means "same module" now that boxOf is module-keyed) and merges them
+  // side by side within the SAME box, exactly like separate root boxes
+  // are merged at the very top of the tree further down.
+  var moduleLocalRoots = {};
+  Object.keys(boxMembers).forEach(function (mod) {
+    boxMembers[mod].forEach(function (id) {
+      var p = parentOf[id];
+      if (p === undefined || boxOf[p] !== mod) {
+        (moduleLocalRoots[mod] = moduleLocalRoots[mod] || []).push(id);
+      }
+    });
+  });
+
+  // The module-level spanning tree: exactly like the function-level one
+  // above, but over MODULE identities instead of individual nodes —
+  // needed so a module reached as a cross-module "exit" from more than
+  // one place (very common: two unrelated functions in two different
+  // modules both happen to call the same third module) still gets laid
+  // out, and thus positioned, exactly once rather than being recursed
+  // into from every place that reaches it.
+  var moduleTreeVisited = {};
+  var moduleChildrenOf = {};
+  var moduleTreeRoots = [];
+  function visitModule(mod, parentMod) {
+    if (moduleTreeVisited[mod]) return;
+    moduleTreeVisited[mod] = true;
+    if (parentMod === undefined) {
+      moduleTreeRoots.push(mod);
+    } else {
+      (moduleChildrenOf[parentMod] = moduleChildrenOf[parentMod] || []).push(mod);
+    }
+    boxMembers[mod].forEach(function (memberId) {
+      (treeChildrenOf[memberId] || []).forEach(function (childId) {
+        var childMod = boxOf[childId];
+        if (childMod !== mod) visitModule(childMod, mod);
+      });
     });
   }
-  treeRoots.forEach(function (id) {
-    assignBox(id, id);
+  treeRoots
+    .map(function (id) {
+      return boxOf[id];
+    })
+    .forEach(function (mod) {
+      visitModule(mod, undefined);
+    });
+  Object.keys(boxMembers).forEach(function (mod) {
+    visitModule(mod, undefined); // any module not reached becomes its own root
   });
 
   // Real Reingold-Tilford, via contour merging — replaces an earlier
@@ -383,12 +435,13 @@ function cgRenderGraph(container, data) {
   // narrower content) at EVERY layer it spans, uniformly — otherwise a
   // neighboring box could tuck in close at one of this box's narrower
   // rows and end up visually inside its drawn rectangle at a wider row
-  // above or below. This is computed in two passes: `layoutBoxLocal`
-  // first lays out a box's own same-module descendants only, giving its
-  // real internal shape and overall width; `layoutBox` then treats the
-  // box as the atomic unit for the OUTER merge, contributing that width
-  // uniformly across all its layers, with each cross-module child (an
-  // "exit") recursively becoming another box.
+  // above or below. This is computed in layers: layoutBoxLocal lays out
+  // one local root's own same-module descendants; layoutModuleLocal
+  // merges a module's (possibly several) local roots side by side into
+  // one shape; layoutModule then treats the whole module as the atomic
+  // unit for the OUTER merge, contributing that width uniformly across
+  // all its layers, with each module-tree child (an "exit") recursively
+  // becoming another box.
   //
   // Contours are keyed by ABSOLUTE layer number (nodeLayer[id]), not by
   // depth-relative-to-this-subtree's-own-root — an earlier version of
@@ -452,11 +505,12 @@ function cgRenderGraph(container, data) {
     return { offsets: offsets, combinedLeft: combinedLeft, combinedRight: combinedRight };
   }
 
-  // A box's own internal layout: same contour algorithm as before,
-  // restricted to same-box (same-module) children only. Gives each
-  // member's position relative to the box's own root, and the box's real
-  // per-layer left/right silhouette — used by layoutBox below to derive
-  // its overall reserved width.
+  // One local root's own internal layout: same contour algorithm as
+  // before, restricted to same-module children only (a module's local
+  // roots can each have their own separate same-module descendants).
+  // Gives each member's position relative to this root, and the
+  // subtree's real per-layer left/right silhouette — merged with any
+  // other local roots of the same module by layoutModuleLocal below.
   function layoutBoxLocal(id) {
     // Floored at 120 to match boxRect's own per-node minimum further
     // down — reserving only the raw (unfloored) label width here left
@@ -512,16 +566,52 @@ function cgRenderGraph(container, data) {
     return { leftContour: leftContour, rightContour: rightContour, relX: relX };
   }
 
-  // The outer layout: boxes (not individual nodes) are the units placed
-  // left to right. A box's "children", for this purpose, are the OTHER
-  // boxes reached by a cross-module edge ("exit") from ANY of its own
-  // members (flattened in box-member order, which is call order) — each
-  // recursively laid out the same way. The box contributes a UNIFORM
-  // left/right silhouette at every layer it spans (its own overall width,
-  // from layoutBoxLocal above), not its real per-row width, so a
-  // neighboring box can never tuck into one of its narrower rows.
-  function layoutBox(boxId) {
-    var local = layoutBoxLocal(boxId);
+  // A module's own internal layout: merges its (possibly several) local
+  // roots side by side, exactly the same left-to-right contour merge
+  // used everywhere else. Centering reads the merge's own offsets
+  // directly rather than a specific node's relX — with several local
+  // roots there's no single node that ends up sitting at relX 0 (only
+  // the pair's midpoint does), whereas offsets[i] is exactly where local
+  // root i's own already-self-normalized subtree (relX 0 at its own
+  // root) landed, before any subsequent recentering.
+  function layoutModuleLocal(mod) {
+    var roots = moduleLocalRoots[mod];
+    var childLayouts = roots.map(layoutBoxLocal);
+    var merged = mergeChildrenLeftToRight(childLayouts);
+
+    var relX = {};
+    childLayouts.forEach(function (cl, i) {
+      Object.keys(cl.relX).forEach(function (nid) {
+        relX[nid] = cl.relX[nid] + merged.offsets[i];
+      });
+    });
+
+    var nodeX = (merged.offsets[0] + merged.offsets[merged.offsets.length - 1]) / 2;
+    Object.keys(relX).forEach(function (nid) {
+      relX[nid] -= nodeX;
+    });
+
+    var leftContour = {};
+    var rightContour = {};
+    Object.keys(merged.combinedLeft).forEach(function (layer) {
+      leftContour[layer] = merged.combinedLeft[layer] - nodeX;
+      rightContour[layer] = merged.combinedRight[layer] - nodeX;
+    });
+
+    return { leftContour: leftContour, rightContour: rightContour, relX: relX };
+  }
+
+  // The outer layout: modules (not individual nodes) are the units
+  // placed left to right. A module's "children", for this purpose, come
+  // from the module-level spanning tree above (moduleChildrenOf) — not
+  // re-derived from individual members here — so a module reached as an
+  // exit from more than one place is still only ever laid out once. The
+  // module contributes a UNIFORM left/right silhouette at every layer it
+  // spans (its own overall width, from layoutModuleLocal above), not its
+  // real per-row width, so a neighboring module can never tuck into one
+  // of its narrower rows.
+  function layoutModule(mod) {
+    var local = layoutModuleLocal(mod);
     var layers = Object.keys(local.leftContour).map(Number);
     var boxLeft = Math.min.apply(
       null,
@@ -537,26 +627,21 @@ function cgRenderGraph(container, data) {
     );
     // Reserve exactly what boxRect below will actually draw: content
     // padded by BOX_PAD_X on both sides, widened further on the right if
-    // the box's own label (which can be wider than its content — see
+    // the module's own label (which can be wider than its content — see
     // cgBoxLabelWidth) needs more room than that. Reserving only the raw
     // content width here — leaving BOX_PAD_X to be added purely at draw
     // time — left every drawn rectangle wider than what TREE_GAP had
     // actually set aside for it, so adjacent boxes' rectangles
     // overlapped even where the underlying node positions didn't.
-    var labelWidth = cgBoxLabelWidth(nodesById[boxId].module);
+    var labelWidth = cgBoxLabelWidth(mod);
     var contentLeft = boxLeft;
     var contentRight = boxRight;
     boxLeft = contentLeft - BOX_PAD_X;
     boxRight = Math.max(contentRight + BOX_PAD_X, contentLeft + labelWidth);
 
-    var exitBoxIds = [];
-    boxMembers[boxId].forEach(function (memberId) {
-      (treeChildrenOf[memberId] || []).forEach(function (childId) {
-        if (boxOf[childId] !== boxId) exitBoxIds.push(childId);
-      });
-    });
+    var exitModules = moduleChildrenOf[mod] || [];
 
-    if (!exitBoxIds.length) {
+    if (!exitModules.length) {
       var leftOnly = {};
       var rightOnly = {};
       layers.forEach(function (l) {
@@ -567,20 +652,21 @@ function cgRenderGraph(container, data) {
     }
 
     // A pseudo "self" entry, fixed first (mergeChildrenLeftToRight never
-    // shifts the first item), representing the box's own uniform
-    // footprint at its own layers. Exits are placed relative to it via
-    // the SAME merge, so one that lands at the same absolute layer as
-    // the box's own internal content — very common: an external call
-    // made directly from the box's root sits at the same layer as the
-    // box's other same-module siblings — still ends up TREE_GAP clear of
-    // it, instead of only ever being checked against other exits.
+    // shifts the first item), representing the module's own uniform
+    // footprint at its own layers. Exit modules are placed relative to
+    // it via the SAME merge, so one that lands at the same absolute
+    // layer as this module's own internal content — very common: an
+    // external call made directly from a local root sits at the same
+    // layer as that root's own same-module siblings — still ends up
+    // TREE_GAP clear of it, instead of only ever being checked against
+    // other exits.
     var selfEntry = { leftContour: {}, rightContour: {}, relX: {} };
     layers.forEach(function (l) {
       selfEntry.leftContour[l] = boxLeft;
       selfEntry.rightContour[l] = boxRight;
     });
 
-    var exitLayouts = exitBoxIds.map(layoutBox);
+    var exitLayouts = exitModules.map(layoutModule);
     var merged = mergeChildrenLeftToRight([selfEntry].concat(exitLayouts));
 
     var relX = {};
@@ -594,10 +680,7 @@ function cgRenderGraph(container, data) {
       });
     });
 
-    var firstX = relX[exitBoxIds[0]];
-    var lastX = relX[exitBoxIds[exitBoxIds.length - 1]];
-    var nodeX = (firstX + lastX) / 2;
-
+    var nodeX = (merged.offsets[1] + merged.offsets[merged.offsets.length - 1]) / 2;
     Object.keys(relX).forEach(function (nid) {
       relX[nid] -= nodeX;
     });
@@ -613,16 +696,17 @@ function cgRenderGraph(container, data) {
   }
 
   // Same contour-merge logic applies one level up, to place the separate
-  // root boxes (Broadway's own entry box, say) against each other — an
-  // imaginary shared parent isn't needed, just the same left-to-right
-  // contour comparison used for sibling boxes above.
-  var rootLayouts = treeRoots.map(layoutBox);
-  var rootMerged = mergeChildrenLeftToRight(rootLayouts);
+  // root modules (Broadway's own box, say, alongside any other module
+  // that's a root in its own right) against each other — an imaginary
+  // shared parent isn't needed, just the same left-to-right contour
+  // comparison used for sibling boxes above.
+  var moduleRootLayouts = moduleTreeRoots.map(layoutModule);
+  var moduleRootMerged = mergeChildrenLeftToRight(moduleRootLayouts);
 
-  treeRoots.forEach(function (id, i) {
-    var rl = rootLayouts[i];
+  moduleTreeRoots.forEach(function (mod, i) {
+    var rl = moduleRootLayouts[i];
     Object.keys(rl.relX).forEach(function (nid) {
-      pos[nid].x = rl.relX[nid] + rootMerged.offsets[i];
+      pos[nid].x = rl.relX[nid] + moduleRootMerged.offsets[i];
     });
   });
 
@@ -694,12 +778,15 @@ function cgRenderGraph(container, data) {
     });
   });
 
-  // Callers never went through the box-assignment DFS above (they're
-  // placed by hand, right above), so each one becomes its own singleton
-  // box here — Codegraph.Scope only ever looks up one generation of
-  // caller, so there's never a same-module chain to fold them into
-  // anyway. This also sweeps up any other id with a position but no box
-  // yet, for the same reason.
+  // Callers never went through module-based box assignment above (they're
+  // placed by hand, right above) — each one becomes its own singleton
+  // box here, keyed by its own node id rather than its module, so a
+  // caller never merges into the SAME box as that module's one downward-
+  // tree location (a caller is dimmed/implicit context — see
+  // callerOnlyIds — genuinely a different thing to show than the real
+  // tree, even on the rare occasion its module coincides). This also
+  // sweeps up any other id with a position but no box yet, for the same
+  // reason.
   Object.keys(pos).forEach(function (id) {
     if (!boxOf[id]) {
       boxOf[id] = id;
@@ -707,13 +794,26 @@ function cgRenderGraph(container, data) {
     }
   });
 
-  var boxIds = Object.keys(boxMembers).filter(function (id) {
-    return pos[id]; // external node with no position (shouldn't happen for function nodes)
+  // Every box's members already came from `pos` by construction (module
+  // boxes via the spanning tree, caller boxes via the sweep above), so
+  // there's nothing to filter out here — unlike a boxId's own node-id
+  // form, which the old per-chain boxes had and this doesn't (a module
+  // box is keyed by its module name, not a node id, so `pos[id]` would
+  // always (wrongly) read as absent for it).
+  var boxIds = Object.keys(boxMembers);
+  // A module-keyed box's id literally IS its module name; a caller's
+  // singleton box is keyed by its own node id instead (see the sweep
+  // above), so its module has to come from nodesById. nodesById is never
+  // keyed by a bare module name (every real entry is
+  // "Module.function/arity"), so this distinguishes the two unambiguously.
+  var boxModule = {};
+  boxIds.forEach(function (id) {
+    boxModule[id] = nodesById[id] ? nodesById[id].module : id;
   });
   var moduleNames = Array.from(
     new Set(
       boxIds.map(function (id) {
-        return nodesById[id].module;
+        return boxModule[id];
       })
     )
   );
@@ -728,13 +828,13 @@ function cgRenderGraph(container, data) {
 
   // A box is drawn as an actual rectangle around its own members (unlike
   // the single global floating label this replaced) — that's only
-  // possible now because box assignment (above) already keeps a
-  // same-module chain visually contiguous, and the box-aware contour
-  // layout already reserves enough space (including this same padding —
-  // see BOX_PAD_X et al above) that nothing else lands inside it.
-  // Estimated (not DOM-measured) label width, so this can run before any
-  // SVG text exists — used both for the initial viewport sizing
-  // (contentExtent below) and every redraw.
+  // possible now because box assignment (above) puts a module's every
+  // occurrence into ONE box, and the box-aware contour layout already
+  // reserves enough space (including this same padding — see BOX_PAD_X
+  // et al above) that nothing else lands inside it. Estimated (not DOM-
+  // measured) label width, so this can run before any SVG text exists —
+  // used both for the initial viewport sizing (contentExtent below) and
+  // every redraw.
   function boxRect(boxId) {
     var minX = Infinity,
       maxX = -Infinity,
@@ -748,7 +848,7 @@ function cgRenderGraph(container, data) {
       if (p.y < minY) minY = p.y;
       if (p.y > maxY) maxY = p.y;
     });
-    var labelWidth = cgBoxLabelWidth(nodesById[boxId].module);
+    var labelWidth = cgBoxLabelWidth(boxModule[boxId]);
     var width = Math.max(maxX - minX + BOX_PAD_X * 2, labelWidth + BOX_PAD_X);
     return {
       x: minX - BOX_PAD_X,
@@ -840,10 +940,9 @@ function cgRenderGraph(container, data) {
   var edgeLayer = root.append("g");
   var nodeLayer = root.append("g");
 
-  // One rectangle per box (see box assignment above), not per module —
-  // a module whose functions occur in several disconnected places in the
-  // tree gets one rectangle per occurrence, each still colored/labeled by
-  // its module name. A caller box (see callerOnlyIds) is dimmed and
+  // One rectangle per box — one per module in the downward tree (see box
+  // assignment above), plus one per caller (kept separate — see
+  // boxModule above). A caller box (see callerOnlyIds) is dimmed and
   // dashed to read as implicit/background context, matching the ordinary
   // downward tree's full-contrast boxes.
   var clusters = clusterLayer
@@ -860,7 +959,7 @@ function cgRenderGraph(container, data) {
     .attr("fill", "#16161c")
     .attr("fill-opacity", 0.5)
     .attr("stroke", function (id) {
-      return color(nodesById[id].module);
+      return color(boxModule[id]);
     })
     .attr("stroke-width", 1.2)
     .attr("stroke-dasharray", function (id) {
@@ -873,13 +972,13 @@ function cgRenderGraph(container, data) {
     .attr("x", 8)
     .attr("y", 15)
     .attr("fill", function (id) {
-      return color(nodesById[id].module);
+      return color(boxModule[id]);
     })
     .attr("font-size", 11)
     .attr("font-family", "ui-monospace, monospace")
     .style("cursor", "text")
     .text(function (id) {
-      return nodesById[id].module;
+      return boxModule[id];
     })
     .on("click", function (event, id) {
       collapsed[id] = !collapsed[id];
