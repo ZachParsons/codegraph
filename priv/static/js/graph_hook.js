@@ -260,16 +260,14 @@ function cgRenderGraph(container, data) {
     nodeLayer[id] = layerIndexByY[Math.round(nodeLayer[id] * 100) / 100];
   });
 
-  // 1.5x beyond the raw viewport-height/level-count split, floor raised
-  // 70->110: rows were still reading as cramped. The graph no longer
-  // necessarily fits the viewport vertically without scrolling/panning
-  // once depth is more than a handful of levels — an intentional
-  // trade-off for more breathing room per row, not the earlier goal of
-  // exactly filling the viewport at any level count.
-  var levelSpacing = Math.max((viewportHeight / layerYs.length) * 1.5, 110);
-  Object.keys(pos).forEach(function (id) {
-    pos[id].y = (nodeLayer[id] + 0.5) * levelSpacing;
-  });
+  // `nodeLayer` itself (compacted, 0-based) is still used below, purely
+  // as a tie-breaker for which caller legitimately claims a shared node
+  // in the spanning tree (see visitForTree) and to seed that tree from
+  // the real roots (layer 0) — but it no longer drives Y position
+  // directly: every node's row now comes from where it lands inside its
+  // module's box (a flat vertical list — see ROW_HEIGHT and layoutModule
+  // further down), which is a fundamentally different vertical axis (box
+  // nesting depth, not call-hop count) and is computed there instead.
 
   // Tidy-tree horizontal placement: nodes are grouped into "boxes" keyed
   // by MODULE — every node belonging to a module is a member of that
@@ -299,30 +297,28 @@ function cgRenderGraph(container, data) {
   var treeVisited = {};
   var treeChildrenOf = {};
   var treeRoots = [];
-  var parentOf = {};
   function visitForTree(id, parent) {
     if (treeVisited[id]) return;
     treeVisited[id] = true;
     if (parent === undefined) {
       treeRoots.push(id);
     } else {
-      parentOf[id] = parent;
       (treeChildrenOf[parent] = treeChildrenOf[parent] || []).push(id);
     }
     (childrenOf[id] || []).forEach(function (childId) {
       // A node reachable via more than one caller must be claimed by a
       // caller whose OWN layer is consistent with it — otherwise this
       // DFS (which explores fully before backtracking to a sibling) can
-      // claim it under a LONGER real path before its true shortest-path
-      // caller (elsewhere in the walk) ever gets the chance, stranding
-      // it a row below where `level` (a shortest-hop BFS count — see
-      // Codegraph.Scope.scope/4) actually puts it, which visibly
-      // conflicts with whichever OTHER node legitimately occupies that
-      // row. With a real `level` present, "consistent" means exactly
-      // one row deeper (`level` is a hop count, not just monotonic); the
-      // unscoped whole-project view has no such `level` and falls back
-      // to sugiyama's own layer, which only guarantees a child's layer
-      // is GREATER, not exactly +1 (see the layer-assignment note above).
+      // claim it under a needlessly long real path before its true
+      // shortest-path caller (elsewhere in the walk) ever gets the
+      // chance, which would put it in a module's own vertical list (see
+      // ROW_HEIGHT further down) via a far less natural route than the
+      // graph actually calls it by. With a real `level` present (a
+      // shortest-hop BFS count — see Codegraph.Scope.scope/4),
+      // "consistent" means exactly one hop deeper; the unscoped
+      // whole-project view has no such `level` and falls back to
+      // sugiyama's own layer, which only guarantees a child's layer is
+      // GREATER, not exactly +1 (see the layer-assignment note above).
       var childInfo = nodesById[childId];
       var consistent =
         childInfo && childInfo.level != null
@@ -357,26 +353,6 @@ function cgRenderGraph(container, data) {
       (boxMembers[mod] = boxMembers[mod] || []).push(id);
       (treeChildrenOf[id] || []).forEach(walk);
     })(rootId);
-  });
-
-  // Within its one box, a module's members can still be scattered across
-  // several unrelated subtrees (structurally: no calls between them, or
-  // only reachable via completely different callers) — each such member
-  // is a "local root" of the module's own internal layout: its spanning-
-  // tree parent is either absent or in a different module. A module with
-  // several local roots lays each out separately (via layoutBoxLocal,
-  // restricted to same-module descendants — its `kids` filter already
-  // means "same module" now that boxOf is module-keyed) and merges them
-  // side by side within the SAME box, exactly like separate root boxes
-  // are merged at the very top of the tree further down.
-  var moduleLocalRoots = {};
-  Object.keys(boxMembers).forEach(function (mod) {
-    boxMembers[mod].forEach(function (id) {
-      var p = parentOf[id];
-      if (p === undefined || boxOf[p] !== mod) {
-        (moduleLocalRoots[mod] = moduleLocalRoots[mod] || []).push(id);
-      }
-    });
   });
 
   // The module-level spanning tree: exactly like the function-level one
@@ -424,43 +400,30 @@ function cgRenderGraph(container, data) {
   // against real Broadway data — up to 4x a node's own label width, and
   // some layers had 2-3x more empty span than actual content).
   //
-  // Contour merging fixes this by comparing, layer by layer, the RIGHT
+  // Contour merging fixes this by comparing, row by row, the RIGHT
   // silhouette of everything already placed against the LEFT silhouette
-  // of the next subtree, and shifting the new subtree only as far right
-  // as the tightest shared layer actually requires — not by its total
-  // width. Two subtrees that are both narrow at some deep layer can
-  // interleave closely there even if one of them is wide higher up.
+  // of the next module box, and shifting the new box only as far right
+  // as the tightest shared row actually requires — not by its total
+  // width. Two boxes that are both narrow at some deep row can interleave
+  // closely there even if one of them is wide higher up.
   //
-  // A box, though, reserves its OWN full width (not each row's own
-  // narrower content) at EVERY layer it spans, uniformly — otherwise a
-  // neighboring box could tuck in close at one of this box's narrower
-  // rows and end up visually inside its drawn rectangle at a wider row
-  // above or below. This is computed in layers: layoutBoxLocal lays out
-  // one local root's own same-module descendants; layoutModuleLocal
-  // merges a module's (possibly several) local roots side by side into
-  // one shape; layoutModule then treats the whole module as the atomic
-  // unit for the OUTER merge, contributing that width uniformly across
-  // all its layers, with each module-tree child (an "exit") recursively
-  // becoming another box.
-  //
-  // Contours are keyed by ABSOLUTE layer number (nodeLayer[id]), not by
-  // depth-relative-to-this-subtree's-own-root — an earlier version of
-  // this used relative depth and was verified to still produce real
-  // overlaps (up to 105px, on real data): sugiyama layering can skip
-  // layers along a single tree edge (a child isn't guaranteed to be
-  // exactly parent-layer+1, only >), and separate root subtrees (a node
-  // never reached from a layer-0 root becomes its own root, whatever
-  // layer it's actually at) don't all start at layer 0 either — so
-  // "relative depth 0 vs relative depth 0" was comparing nodes that
-  // often weren't even at the same visual row, missing real collisions
-  // at their true shared layers. Plain objects (not arrays) hold the
-  // per-layer values so gaps don't need explicit padding.
+  // A module's own functions are laid out as a plain vertical LIST inside
+  // its box — one row each, in call order, all in a single column — not
+  // as a branching tree: every row is therefore the SAME width (the
+  // widest member), reserved uniformly at every row the box spans, so a
+  // neighboring box can never tuck into it. Rows are counted purely by
+  // this box nesting (a box's own N members occupy N rows, then each
+  // module-tree child — an "exit" — starts immediately below, however
+  // many rows ITS OWN list plus its own exits need), not by call-hop
+  // count — see ROW_HEIGHT below for why that's a different axis now.
+  // Plain objects (not arrays) hold the per-row values so gaps don't
+  // need explicit padding.
   var TREE_GAP = 24;
 
   // A box's DRAWN rectangle (see boxRect further down) is its content
   // plus this padding on every side (BOX_PAD_TOP is taller, to leave
   // room for the module-name label at the top). Defined here — not down
-  // by boxRect itself — because layoutBox below must reserve exactly
+  // by boxRect itself — because layoutModule below must reserve exactly
   // this much extra space during layout too: reserving only the raw
   // content width and padding just the DRAWING left every box's actual
   // rectangle several pixels wider than what TREE_GAP had set aside for
@@ -471,11 +434,39 @@ function cgRenderGraph(container, data) {
   var BOX_PAD_BOTTOM = 10;
   var NODE_HALF_ROW = 28; // half a node's own rendered height (circle + multi-line label)
 
-  // Shared by layoutBoxLocal/layoutBox below (and by the root-level merge
-  // further down): places `childLayouts` left to right, shifting each one
-  // just far enough right that, at every ABSOLUTE layer where it and
-  // everything already placed both have a contour, they're at least
-  // TREE_GAP apart.
+  // Vertical distance between consecutive rows within one module's own
+  // list. A fixed constant, not the old viewport-filling calculation:
+  // rows now count list position and box nesting, not a bounded "how
+  // many BFS levels does the whole graph have", so there's no natural
+  // total count to divide the viewport by any more — just always give a
+  // member (up to a 3-line label: module name, signature, return type —
+  // plus its circle, see NODE_HALF_ROW) enough room not to crowd its
+  // neighbors.
+  //
+  // Must exceed a box's own padded span around a single row (2 *
+  // NODE_HALF_ROW + BOX_PAD_TOP + BOX_PAD_BOTTOM = 92): the contour
+  // system (below) only reserves horizontal separation between two boxes
+  // at rows they actually SHARE, so two boxes that end up at adjacent —
+  // not shared — absolute rows (whether one is the other's module-tree
+  // child, or they're entirely unrelated subtrees that just happened to
+  // land next to each other) are never compared at all. If a row's own
+  // padded span were taller than the gap to the next row, their drawn
+  // rectangles could still overlap despite occupying "different" rows.
+  // The margin here (18px) is deliberately on top of that minimum, not
+  // padding-tight, to keep drawn boxes/rows visually separated.
+  var ROW_HEIGHT = 110;
+
+  // Extra whole rows inserted between a box's own list and its
+  // module-tree children (see layoutModule below) — purely a visual cue
+  // (not load-bearing for overlap prevention now that ROW_HEIGHT itself
+  // exceeds a row's own padded span) so a new box beginning reads as
+  // more of a break than the next item in the same list.
+  var MODULE_GAP_ROWS = 1;
+
+  // Shared below (and by the root-level merge further down): places
+  // `childLayouts` left to right, shifting each one just far enough
+  // right that, at every ABSOLUTE row where it and everything already
+  // placed both have a contour, they're at least TREE_GAP apart.
   function mergeChildrenLeftToRight(childLayouts) {
     var offsets = new Array(childLayouts.length);
     var combinedLeft = {};
@@ -483,146 +474,52 @@ function cgRenderGraph(container, data) {
     childLayouts.forEach(function (cl, i) {
       var shift = 0;
       if (i > 0) {
-        Object.keys(cl.leftContour).forEach(function (layer) {
-          if (!combinedRight.hasOwnProperty(layer)) return;
-          var needed = combinedRight[layer] + TREE_GAP - cl.leftContour[layer];
+        Object.keys(cl.leftContour).forEach(function (row) {
+          if (!combinedRight.hasOwnProperty(row)) return;
+          var needed = combinedRight[row] + TREE_GAP - cl.leftContour[row];
           if (needed > shift) shift = needed;
         });
       }
       offsets[i] = shift;
-      Object.keys(cl.leftContour).forEach(function (layer) {
-        var lv = cl.leftContour[layer] + shift;
-        var rv = cl.rightContour[layer] + shift;
-        if (combinedLeft.hasOwnProperty(layer)) {
-          if (lv < combinedLeft[layer]) combinedLeft[layer] = lv;
-          if (rv > combinedRight[layer]) combinedRight[layer] = rv;
+      Object.keys(cl.leftContour).forEach(function (row) {
+        var lv = cl.leftContour[row] + shift;
+        var rv = cl.rightContour[row] + shift;
+        if (combinedLeft.hasOwnProperty(row)) {
+          if (lv < combinedLeft[row]) combinedLeft[row] = lv;
+          if (rv > combinedRight[row]) combinedRight[row] = rv;
         } else {
-          combinedLeft[layer] = lv;
-          combinedRight[layer] = rv;
+          combinedLeft[row] = lv;
+          combinedRight[row] = rv;
         }
       });
     });
     return { offsets: offsets, combinedLeft: combinedLeft, combinedRight: combinedRight };
   }
 
-  // One local root's own internal layout: same contour algorithm as
-  // before, restricted to same-module children only (a module's local
-  // roots can each have their own separate same-module descendants).
-  // Gives each member's position relative to this root, and the
-  // subtree's real per-layer left/right silhouette — merged with any
-  // other local roots of the same module by layoutModuleLocal below.
-  function layoutBoxLocal(id) {
+  // A module's own layout: its members stacked as a plain vertical list
+  // (relY 0, 1, 2, ... in call order, all at relX 0 — a single column),
+  // then each module-tree child ("exit" — see moduleChildrenOf above)
+  // recursively laid out and placed starting immediately below this
+  // box's own rows, spread out left-to-right via the same contour merge
+  // used everywhere else so two exits (or an exit and this box's own
+  // rows) never overlap. Returned leftContour/rightContour are keyed by
+  // row LOCAL to this module's own top (0 = this module's first member),
+  // not by any absolute/global count — self-consistent by construction,
+  // since every row number here comes from this same recursive walk, not
+  // from an external reference the recursion could disagree with.
+  function layoutModule(mod) {
+    var members = boxMembers[mod];
+    var ownHeight = members.length;
+
     // Floored at 120 to match boxRect's own per-node minimum further
     // down — reserving only the raw (unfloored) label width here left
     // short-labeled nodes (an external leaf like "each/2", say) with a
     // narrower reservation than the rectangle boxRect actually draws
     // for them, so two short-labeled sibling boxes could still overlap.
-    var ownHalf = Math.max(cgLabelWidth(nodesById[id]), 120) / 2;
-    var myLayer = nodeLayer[id];
-    var kids = (treeChildrenOf[id] || []).filter(function (c) {
-      return boxOf[c] === boxOf[id];
-    });
-
-    if (!kids.length) {
-      var leafRelX = {};
-      leafRelX[id] = 0;
-      var leafLeft = {};
-      var leafRight = {};
-      leafLeft[myLayer] = -ownHalf;
-      leafRight[myLayer] = ownHalf;
-      return { leftContour: leafLeft, rightContour: leafRight, relX: leafRelX };
-    }
-
-    var childLayouts = kids.map(layoutBoxLocal);
-    var merged = mergeChildrenLeftToRight(childLayouts);
-
-    var relX = {};
-    childLayouts.forEach(function (cl, i) {
-      Object.keys(cl.relX).forEach(function (nid) {
-        relX[nid] = cl.relX[nid] + merged.offsets[i];
-      });
-    });
-
-    // Center this node over its first and last direct child's actual
-    // (now-placed) position, same centering rule as before.
-    var firstKidX = relX[kids[0]];
-    var lastKidX = relX[kids[kids.length - 1]];
-    var nodeX = (firstKidX + lastKidX) / 2;
-
-    relX[id] = 0;
-    Object.keys(relX).forEach(function (nid) {
-      if (nid !== id) relX[nid] -= nodeX;
-    });
-
-    var leftContour = {};
-    var rightContour = {};
-    leftContour[myLayer] = -ownHalf;
-    rightContour[myLayer] = ownHalf;
-    Object.keys(merged.combinedLeft).forEach(function (layer) {
-      leftContour[layer] = merged.combinedLeft[layer] - nodeX;
-      rightContour[layer] = merged.combinedRight[layer] - nodeX;
-    });
-
-    return { leftContour: leftContour, rightContour: rightContour, relX: relX };
-  }
-
-  // A module's own internal layout: merges its (possibly several) local
-  // roots side by side, exactly the same left-to-right contour merge
-  // used everywhere else. Centering reads the merge's own offsets
-  // directly rather than a specific node's relX — with several local
-  // roots there's no single node that ends up sitting at relX 0 (only
-  // the pair's midpoint does), whereas offsets[i] is exactly where local
-  // root i's own already-self-normalized subtree (relX 0 at its own
-  // root) landed, before any subsequent recentering.
-  function layoutModuleLocal(mod) {
-    var roots = moduleLocalRoots[mod];
-    var childLayouts = roots.map(layoutBoxLocal);
-    var merged = mergeChildrenLeftToRight(childLayouts);
-
-    var relX = {};
-    childLayouts.forEach(function (cl, i) {
-      Object.keys(cl.relX).forEach(function (nid) {
-        relX[nid] = cl.relX[nid] + merged.offsets[i];
-      });
-    });
-
-    var nodeX = (merged.offsets[0] + merged.offsets[merged.offsets.length - 1]) / 2;
-    Object.keys(relX).forEach(function (nid) {
-      relX[nid] -= nodeX;
-    });
-
-    var leftContour = {};
-    var rightContour = {};
-    Object.keys(merged.combinedLeft).forEach(function (layer) {
-      leftContour[layer] = merged.combinedLeft[layer] - nodeX;
-      rightContour[layer] = merged.combinedRight[layer] - nodeX;
-    });
-
-    return { leftContour: leftContour, rightContour: rightContour, relX: relX };
-  }
-
-  // The outer layout: modules (not individual nodes) are the units
-  // placed left to right. A module's "children", for this purpose, come
-  // from the module-level spanning tree above (moduleChildrenOf) — not
-  // re-derived from individual members here — so a module reached as an
-  // exit from more than one place is still only ever laid out once. The
-  // module contributes a UNIFORM left/right silhouette at every layer it
-  // spans (its own overall width, from layoutModuleLocal above), not its
-  // real per-row width, so a neighboring module can never tuck into one
-  // of its narrower rows.
-  function layoutModule(mod) {
-    var local = layoutModuleLocal(mod);
-    var layers = Object.keys(local.leftContour).map(Number);
-    var boxLeft = Math.min.apply(
+    var contentWidth = Math.max.apply(
       null,
-      layers.map(function (l) {
-        return local.leftContour[l];
-      })
-    );
-    var boxRight = Math.max.apply(
-      null,
-      layers.map(function (l) {
-        return local.rightContour[l];
+      members.map(function (id) {
+        return Math.max(cgLabelWidth(nodesById[id]), 120);
       })
     );
     // Reserve exactly what boxRect below will actually draw: content
@@ -634,52 +531,65 @@ function cgRenderGraph(container, data) {
     // actually set aside for it, so adjacent boxes' rectangles
     // overlapped even where the underlying node positions didn't.
     var labelWidth = cgBoxLabelWidth(mod);
-    var contentLeft = boxLeft;
-    var contentRight = boxRight;
-    boxLeft = contentLeft - BOX_PAD_X;
-    boxRight = Math.max(contentRight + BOX_PAD_X, contentLeft + labelWidth);
-
-    var exitModules = moduleChildrenOf[mod] || [];
-
-    if (!exitModules.length) {
-      var leftOnly = {};
-      var rightOnly = {};
-      layers.forEach(function (l) {
-        leftOnly[l] = boxLeft;
-        rightOnly[l] = boxRight;
-      });
-      return { leftContour: leftOnly, rightContour: rightOnly, relX: local.relX };
-    }
-
-    // A pseudo "self" entry, fixed first (mergeChildrenLeftToRight never
-    // shifts the first item), representing the module's own uniform
-    // footprint at its own layers. Exit modules are placed relative to
-    // it via the SAME merge, so one that lands at the same absolute
-    // layer as this module's own internal content — very common: an
-    // external call made directly from a local root sits at the same
-    // layer as that root's own same-module siblings — still ends up
-    // TREE_GAP clear of it, instead of only ever being checked against
-    // other exits.
-    var selfEntry = { leftContour: {}, rightContour: {}, relX: {} };
-    layers.forEach(function (l) {
-      selfEntry.leftContour[l] = boxLeft;
-      selfEntry.rightContour[l] = boxRight;
-    });
-
-    var exitLayouts = exitModules.map(layoutModule);
-    var merged = mergeChildrenLeftToRight([selfEntry].concat(exitLayouts));
+    var halfContent = contentWidth / 2;
+    var boxLeft = -halfContent - BOX_PAD_X;
+    var boxRight = Math.max(halfContent + BOX_PAD_X, -halfContent + labelWidth);
 
     var relX = {};
-    Object.keys(local.relX).forEach(function (nid) {
-      relX[nid] = local.relX[nid];
+    var relY = {};
+    members.forEach(function (id, i) {
+      relX[id] = 0;
+      relY[id] = i;
     });
-    exitLayouts.forEach(function (cl, i) {
+
+    var selfEntry = { leftContour: {}, rightContour: {} };
+    for (var r = 0; r < ownHeight; r++) {
+      selfEntry.leftContour[r] = boxLeft;
+      selfEntry.rightContour[r] = boxRight;
+    }
+
+    var exitModules = moduleChildrenOf[mod] || [];
+    if (!exitModules.length) {
+      return {
+        relX: relX,
+        relY: relY,
+        totalHeight: ownHeight,
+        leftContour: selfEntry.leftContour,
+        rightContour: selfEntry.rightContour,
+      };
+    }
+
+    // Each exit's own contour (rows 0..itsHeight-1, local to ITS top) is
+    // shifted down by ownHeight + MODULE_GAP_ROWS before merging, so
+    // "exit's row 0" lines up with "MODULE_GAP_ROWS rows after this
+    // box's own last member" — the same idea as the pseudo self-entry
+    // trick used elsewhere, just shifting rows here instead of shifting
+    // X.
+    var childRowOffset = ownHeight + MODULE_GAP_ROWS;
+    var exitLayouts = exitModules.map(function (childMod) {
+      var el = layoutModule(childMod);
+      var lc = {};
+      var rc = {};
+      Object.keys(el.leftContour).forEach(function (row) {
+        lc[Number(row) + childRowOffset] = el.leftContour[row];
+        rc[Number(row) + childRowOffset] = el.rightContour[row];
+      });
+      return { leftContour: lc, rightContour: rc, relX: el.relX, relY: el.relY, totalHeight: el.totalHeight };
+    });
+
+    var merged = mergeChildrenLeftToRight([selfEntry].concat(exitLayouts));
+
+    exitLayouts.forEach(function (el, i) {
       var offset = merged.offsets[i + 1]; // +1: offsets[0] is the self entry
-      Object.keys(cl.relX).forEach(function (nid) {
-        relX[nid] = cl.relX[nid] + offset;
+      Object.keys(el.relX).forEach(function (nid) {
+        relX[nid] = el.relX[nid] + offset;
+        relY[nid] = el.relY[nid] + childRowOffset;
       });
     });
 
+    // Center this box over the exits' combined span (first to last),
+    // same centering rule used everywhere else — this box's own rows
+    // stay at relX 0 relative to that center, i.e. they shift too.
     var nodeX = (merged.offsets[1] + merged.offsets[merged.offsets.length - 1]) / 2;
     Object.keys(relX).forEach(function (nid) {
       relX[nid] -= nodeX;
@@ -687,26 +597,42 @@ function cgRenderGraph(container, data) {
 
     var leftContour = {};
     var rightContour = {};
-    Object.keys(merged.combinedLeft).forEach(function (layer) {
-      leftContour[layer] = merged.combinedLeft[layer] - nodeX;
-      rightContour[layer] = merged.combinedRight[layer] - nodeX;
+    Object.keys(merged.combinedLeft).forEach(function (row) {
+      leftContour[row] = merged.combinedLeft[row] - nodeX;
+      rightContour[row] = merged.combinedRight[row] - nodeX;
     });
 
-    return { leftContour: leftContour, rightContour: rightContour, relX: relX };
+    var maxExitHeight = Math.max.apply(
+      null,
+      exitLayouts.map(function (el) {
+        return el.totalHeight;
+      })
+    );
+
+    return {
+      relX: relX,
+      relY: relY,
+      totalHeight: childRowOffset + maxExitHeight,
+      leftContour: leftContour,
+      rightContour: rightContour,
+    };
   }
 
   // Same contour-merge logic applies one level up, to place the separate
   // root modules (Broadway's own box, say, alongside any other module
   // that's a root in its own right) against each other — an imaginary
   // shared parent isn't needed, just the same left-to-right contour
-  // comparison used for sibling boxes above.
+  // comparison used for sibling boxes above. Every root module starts at
+  // row 0 (they're independent, side by side, not stacked on each other).
   var moduleRootLayouts = moduleTreeRoots.map(layoutModule);
   var moduleRootMerged = mergeChildrenLeftToRight(moduleRootLayouts);
 
   moduleTreeRoots.forEach(function (mod, i) {
     var rl = moduleRootLayouts[i];
+    var offset = moduleRootMerged.offsets[i];
     Object.keys(rl.relX).forEach(function (nid) {
-      pos[nid].x = rl.relX[nid] + moduleRootMerged.offsets[i];
+      pos[nid].x = rl.relX[nid] + offset;
+      pos[nid].y = (rl.relY[nid] + 0.5) * ROW_HEIGHT;
     });
   });
 
@@ -750,7 +676,7 @@ function cgRenderGraph(container, data) {
     return {
       callerIds: callerIds,
       xs: xs,
-      y: pos[rootId].y - levelSpacing,
+      y: pos[rootId].y - (1 + MODULE_GAP_ROWS) * ROW_HEIGHT,
       left: startX,
       right: cursor - TREE_GAP,
     };
