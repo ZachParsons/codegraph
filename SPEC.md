@@ -73,8 +73,8 @@ node's row. Unset/unbounded module depth (the default) applies no extra cap
 beyond depth itself.
 
 ```
-mix codegraph --root MyApp.Accounts --depth 4
-mix codegraph --root MyApp.Accounts --root MyApp.Billing --depth 6 --module-depth 2
+mix codegraph --root MyApp.Accounts --fdepth 4
+mix codegraph --root MyApp.Accounts --root MyApp.Billing --fdepth 6 --mdepth 2
 ```
 
 ## Graph model
@@ -166,6 +166,6 @@ mix codegraph --root MyApp.Accounts --diff main..feature-branch
   calls through `apply/3`, dynamically constructed module atoms, behaviour
   callbacks) — likely best-effort with a visible "unresolved call" marker
   rather than silently dropping them.
-- Whether `--depth` unbounded is ever practical on a large app, or should
-  default to a small number (e.g. 2) with an explicit `--depth :infinity`
+- Whether `--fdepth` unbounded is ever practical on a large app, or should
+  default to a small number (e.g. 2) with an explicit `--fdepth :infinity`
   opt-in.

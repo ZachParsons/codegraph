@@ -5,27 +5,31 @@ defmodule Mix.Tasks.Codegraph do
 
       mix codegraph [--port 4444] [--path lib] \\
         [--root MyApp.Accounts] [--root MyApp.Billing.create_invoice/2] \\
-        [--depth 2] [--module-depth infinity] [--diff BASE_REF..HEAD_REF]
+        [--fdepth 2] [--mdepth infinity] [--diff BASE_REF..HEAD_REF]
 
   `--root` may be given multiple times to seed the BFS from several roots,
   and each one is either a module (`MyApp.Accounts`, seeds from every
   function it defines) or one specific function (`MyApp.Accounts.
   create_user/1` — the trailing `/N` arity is what marks it as a function
   rather than a module). Omit `--root` entirely to render the whole
-  project graph unscoped. `--depth` (function-call hops away from the
+  project graph unscoped. `--fdepth` (function-call hops away from the
   root(s); each row in the graph is one hop, including calls that stay
-  inside the same module) and `--module-depth` (distinct modules crossed
+  inside the same module) and `--mdepth` (distinct modules crossed
   on a given path — a call that stays in the current module is free) each
   accept an integer or `infinity`, and bound the walk independently:
-  `--depth` defaults to `2`, `--module-depth` defaults to `infinity` (no
-  extra cap beyond `--depth` itself). `--path` is the directory to scan
+  `--fdepth` defaults to `2`, `--mdepth` defaults to `infinity` (no
+  extra cap beyond `--fdepth` itself). `--path` is the directory to scan
   for `.ex` files; defaults to `lib`,
   relative to the current project root. It may also be an absolute path
   (or a relative one that escapes the current project, e.g. `../other-
   lib/lib`) to graph another package's source directly, without adding
   codegraph as a dependency there — analysis is pure static parsing, so
   the target package need not be fetched, compiled, or even be a Mix
-  project. `--diff` renders the diff between two git refs (e.g.
+  project. The scan is recursive under `--path`, but `deps/` and
+  `_build/` are always excluded even if they fall underneath it — so
+  pointing `--path` at a whole package root (rather than just its `lib/`)
+  is safe and won't pull in vendored dependency source. `--diff` renders
+  the diff between two git refs (e.g.
   `main..HEAD`) instead of the working tree, and requires `--path` to
   stay relative and inside the current git repo (it walks git history,
   not the filesystem).
@@ -49,8 +53,8 @@ defmodule Mix.Tasks.Codegraph do
           port: :integer,
           path: :string,
           root: :keep,
-          depth: :string,
-          module_depth: :string,
+          fdepth: :string,
+          mdepth: :string,
           diff: :string
         ]
       )
@@ -63,8 +67,8 @@ defmodule Mix.Tasks.Codegraph do
       |> Keyword.get_values(:root)
       |> Enum.map(&parse_root/1)
 
-    depth = parse_depth(Keyword.get(opts, :depth, "2"))
-    module_depth = parse_depth(Keyword.get(opts, :module_depth, "infinity"))
+    depth = parse_depth(Keyword.get(opts, :fdepth, "2"))
+    module_depth = parse_depth(Keyword.get(opts, :mdepth, "infinity"))
 
     diff =
       case Keyword.get(opts, :diff) do
