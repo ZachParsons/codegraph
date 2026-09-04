@@ -122,6 +122,22 @@ defmodule Codegraph.AnalyzerTest do
     assert node.spec_return == nil
   end
 
+  test "skips macro-generated def/@spec heads (unquote(name)) instead of crashing" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        for {name, value} <- [a: 1, b: 2] do
+          @spec unquote(name)() :: unquote(value)
+          def unquote(name)(), do: unquote(value)
+        end
+
+        def real(x), do: x
+      end
+      """)
+
+    assert Enum.any?(graph.nodes, &(&1.module == Foo and &1.function == :real and &1.arity == 1))
+  end
+
   test "edges preserve call order" do
     graph =
       Analyzer.analyze_source("""

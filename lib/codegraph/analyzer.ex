@@ -125,20 +125,29 @@ defmodule Codegraph.Analyzer do
 
   # -- def/defp: register the function, descend with new function context --
   defp walk({kind, _, [head, [do: body]]}, ctx, acc) when kind in [:def, :defp] and not is_nil(ctx.module) do
-    {name, arity} = fun_head(head)
+    case fun_head(head) do
+      # Macro-generated def head (e.g. `def unquote(name)(), do: ...` inside
+      # a `for`/quote comprehension) — the name isn't a literal atom in the
+      # raw AST, so there's no function identity to register a node under.
+      # Still walk the body so calls it makes are captured, just without
+      # updating the function context.
+      nil ->
+        walk(body, ctx, acc)
 
-    node = %Node{
-      module: ctx.module,
-      function: name,
-      arity: arity,
-      external: false,
-      status: :unchanged,
-      hash: :erlang.phash2(body),
-      params: fun_params(head)
-    }
+      {name, arity} ->
+        node = %Node{
+          module: ctx.module,
+          function: name,
+          arity: arity,
+          external: false,
+          status: :unchanged,
+          hash: :erlang.phash2(body),
+          params: fun_params(head)
+        }
 
-    acc = add_node(acc, node)
-    walk(body, %{ctx | function: {name, arity}}, acc)
+        acc = add_node(acc, node)
+        walk(body, %{ctx | function: {name, arity}}, acc)
+    end
   end
 
   # -- @spec: record the type signature, keyed by module/name/arity, to be
@@ -146,10 +155,18 @@ defmodule Codegraph.Analyzer do
   # (a @spec can be written above or below the def it describes) --
   defp walk({:@, _, [{:spec, _, [{:"::", _, [head, return_type]}]}]}, ctx, acc)
        when not is_nil(ctx.module) do
-    {name, arg_types} = spec_head(head)
-    key = {ctx.module, name, length(arg_types)}
-    spec = %{args: Enum.map(arg_types, &Macro.to_string/1), return: Macro.to_string(return_type)}
-    %{acc | specs: Map.put(acc.specs, key, spec)}
+    case spec_head(head) do
+      # Macro-generated @spec head (name isn't a literal atom in the raw
+      # AST) — nothing to key it by, so there's no matching def to attach
+      # this spec to.
+      nil ->
+        acc
+
+      {name, arg_types} ->
+        key = {ctx.module, name, length(arg_types)}
+        spec = %{args: Enum.map(arg_types, &Macro.to_string/1), return: Macro.to_string(return_type)}
+        %{acc | specs: Map.put(acc.specs, key, spec)}
+    end
   end
 
   # -- pipe: rhs's arity gets +1 for the piped-in lhs argument --
@@ -214,6 +231,10 @@ defmodule Codegraph.Analyzer do
     {name, if(is_list(args), do: length(args), else: 0)}
   end
 
+  # Anything else (e.g. `unquote(name)()`, from a `for`/quote-generated def)
+  # has no literal function name in the raw AST.
+  defp fun_head(_other), do: nil
+
   # Readable text for each parameter, straight from the def head's own
   # patterns — handles plain vars, defaults, and destructuring patterns
   # alike via Macro.to_string/1, rather than hand-writing a pattern-to-
@@ -232,6 +253,10 @@ defmodule Codegraph.Analyzer do
   defp spec_head({name, _, args}) when is_atom(name) do
     {name, List.wrap(args)}
   end
+
+  # Same rationale as fun_head/1's fallback: no literal name to key this
+  # spec by.
+  defp spec_head(_other), do: nil
 
   defp resolve_alias({:__aliases__, _, parts}, nil), do: Module.concat(parts)
   defp resolve_alias({:__aliases__, _, parts}, parent), do: Module.concat([parent | parts])

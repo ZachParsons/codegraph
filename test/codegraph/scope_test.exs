@@ -259,4 +259,36 @@ defmodule Codegraph.ScopeTest do
 
     assert order == [:third, :first, :second]
   end
+
+  test "project_graph excludes deps/ and _build/ even from a recursive glob" do
+    dir = Path.join(System.tmp_dir!(), "codegraph_scope_vendored_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(dir, "lib"))
+    File.mkdir_p!(Path.join(dir, "deps/some_dep/lib"))
+    File.mkdir_p!(Path.join(dir, "_build/dev/lib/some_dep"))
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    File.write!(Path.join(dir, "lib/real.ex"), """
+    defmodule Real do
+      def entry(x), do: x
+    end
+    """)
+
+    File.write!(Path.join(dir, "deps/some_dep/lib/vendored.ex"), """
+    defmodule Vendored do
+      def entry(x), do: x
+    end
+    """)
+
+    File.write!(Path.join(dir, "_build/dev/lib/some_dep/compiled.ex"), """
+    defmodule Compiled do
+      def entry(x), do: x
+    end
+    """)
+
+    graph = Scope.project_graph(["**/*.ex"], dir)
+
+    assert Enum.any?(graph.nodes, &(&1.module == Real))
+    refute Enum.any?(graph.nodes, &(&1.module == Vendored))
+    refute Enum.any?(graph.nodes, &(&1.module == Compiled))
+  end
 end

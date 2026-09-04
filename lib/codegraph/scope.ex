@@ -53,8 +53,19 @@ defmodule Codegraph.Scope do
       globs
       |> Enum.flat_map(&Path.wildcard(Path.expand(&1, cwd)))
       |> Enum.uniq()
+      |> Enum.reject(&vendored?/1)
 
     files |> Enum.map(&Analyzer.analyze_file/1) |> merge()
+  end
+
+  # A recursive glob (e.g. `--path` pointing at a whole package root rather
+  # than just its `lib/`) would otherwise sweep in fetched deps and
+  # compiled artifacts alongside real source, which is both noise in the
+  # graph and a source of exotic macro-generated ASTs the analyzer isn't
+  # meant to handle.
+  @vendored_segments ["deps", "_build"]
+  defp vendored?(path) do
+    path |> Path.split() |> Enum.any?(&(&1 in @vendored_segments))
   end
 
   @doc """
