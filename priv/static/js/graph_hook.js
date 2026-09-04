@@ -81,6 +81,14 @@ var CG_STATUS_COLOR = {
 
 var CG_CALLER_EDGE_COLOR = "#5a5a66"; // dim/halftone — the caller tree above the root is implicit context, not the primary call tree
 
+// Click-to-focus colors: a clicked node's INCOMING edges/callers (purple)
+// vs OUTGOING edges/callees (orange) — deliberately far from the status
+// palette above (green/red/amber) and the multi-select blue, so all four
+// meanings stay visually distinct at once.
+var CG_INCOMING_EDGE_COLOR = "#a78bfa";
+var CG_OUTGOING_EDGE_COLOR = "#ffa94d";
+var CG_DIM_OPACITY = 0.1;
+
 // Escape clears both node selection and any active browser text
 // selection. Tracked at module scope (not just inside cgRenderGraph) so a
 // re-render (filter change, diff reload, etc.) can remove the PREVIOUS
@@ -108,7 +116,7 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
-    '<span style="opacity:0.5; font-size:11px;">drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
+    '<span style="opacity:0.5; font-size:11px;">click a node to highlight its callers/calls · drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
 
@@ -848,19 +856,30 @@ function cgRenderGraph(container, data) {
     d3.zoomIdentity.translate(20, 20).scale(Math.max(fitScale, 0.03))
   );
 
-  svg
-    .append("defs")
-    .append("marker")
-    .attr("id", "cg-arrow")
-    .attr("viewBox", "0 -5 10 10")
-    .attr("refX", 17)
-    .attr("refY", 0)
-    .attr("markerWidth", 6)
-    .attr("markerHeight", 6)
-    .attr("orient", "auto")
-    .append("path")
-    .attr("d", "M0,-5L10,0L0,5")
-    .attr("fill", "#8a8a92");
+  var defs = svg.append("defs");
+  // Three arrowheads (default/outgoing/incoming), swapped per edge in
+  // updateFocusHighlight below — an SVG <marker> doesn't inherit its
+  // path's stroke color on its own, so matching the arrowhead to a
+  // focus-highlighted edge needs its own marker per color rather than one
+  // shared marker.
+  [
+    { id: "cg-arrow", color: "#8a8a92" },
+    { id: "cg-arrow-out", color: CG_OUTGOING_EDGE_COLOR },
+    { id: "cg-arrow-in", color: CG_INCOMING_EDGE_COLOR },
+  ].forEach(function (m) {
+    defs
+      .append("marker")
+      .attr("id", m.id)
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 17)
+      .attr("refY", 0)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-5L10,0L0,5")
+      .attr("fill", m.color);
+  });
 
   var clusterLayer = root.append("g");
   var edgeLayer = root.append("g");
@@ -954,7 +973,20 @@ function cgRenderGraph(container, data) {
   // in sync instead of duplicating the same status/external logic twice.
   var selectedIds = new Set();
 
+  // Click-to-focus state: the one node last plain-clicked (no modifier),
+  // plus the node ids reachable from it by one outgoing/incoming edge —
+  // recomputed by updateFocusHighlight() below whenever focusedId changes.
+  // A plain click is a distinct gesture from the modifier-based
+  // multi-select above (selectedIds/rubber-band), so the two coexist
+  // rather than sharing state.
+  var focusedId = null;
+  var connectedOutIds = new Set();
+  var connectedInIds = new Set();
+
   function nodeStroke(id) {
+    if (id === focusedId) return "#4f9dff";
+    if (connectedOutIds.has(id)) return CG_OUTGOING_EDGE_COLOR;
+    if (connectedInIds.has(id)) return CG_INCOMING_EDGE_COLOR;
     if (selectedIds.has(id)) return "#4f9dff";
     var info = nodesById[id];
     if (info.external || callerOnlyIds.has(id)) return "#777";
@@ -962,12 +994,75 @@ function cgRenderGraph(container, data) {
   }
 
   function nodeStrokeWidth(id) {
+    if (id === focusedId || connectedOutIds.has(id) || connectedInIds.has(id)) return 3;
     if (selectedIds.has(id)) return 3;
     return CG_STATUS_COLOR[nodesById[id].status] ? 2 : 1.3;
   }
 
+  // A node not connected to the focused one (when a focus is active) is
+  // dimmed instead of hidden — hiding would also have to hide/re-layout
+  // its edges and box, whereas dimming keeps the whole graph's shape
+  // legible while still making the highlighted subgraph pop.
+  function nodeOpacity(id) {
+    var base = nodesById[id].external || callerOnlyIds.has(id) ? 0.55 : 1;
+    if (!focusedId) return base;
+    return id === focusedId || connectedOutIds.has(id) || connectedInIds.has(id) ? base : CG_DIM_OPACITY;
+  }
+
   function updateSelectionHighlight() {
     nodeG.select("circle").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
+  }
+
+  function edgeMarker(e) {
+    if (outgoingEdgeSet.has(e)) return "url(#cg-arrow-out)";
+    if (incomingEdgeSet.has(e)) return "url(#cg-arrow-in)";
+    return "url(#cg-arrow)";
+  }
+
+  // Edge objects (not just node ids) reachable from the focused node —
+  // membership is by object identity, which works because edgePaths' own
+  // data (edgeList.concat(callerEdgeList)) is these exact same objects.
+  var outgoingEdgeSet = new Set();
+  var incomingEdgeSet = new Set();
+
+  function updateFocusHighlight() {
+    outgoingEdgeSet = new Set();
+    incomingEdgeSet = new Set();
+    connectedOutIds = new Set();
+    connectedInIds = new Set();
+
+    if (focusedId) {
+      edgeList.concat(callerEdgeList).forEach(function (e) {
+        if (e.fromId === focusedId) {
+          outgoingEdgeSet.add(e);
+          connectedOutIds.add(e.toId);
+        }
+        if (e.toId === focusedId) {
+          incomingEdgeSet.add(e);
+          connectedInIds.add(e.fromId);
+        }
+      });
+    }
+
+    edgePaths
+      .attr("stroke", function (e) {
+        if (outgoingEdgeSet.has(e)) return CG_OUTGOING_EDGE_COLOR;
+        if (incomingEdgeSet.has(e)) return CG_INCOMING_EDGE_COLOR;
+        if (e.kind === "caller") return CG_CALLER_EDGE_COLOR;
+        return CG_STATUS_COLOR[e.status] || "#8a8a92";
+      })
+      .attr("stroke-width", function (e) {
+        if (outgoingEdgeSet.has(e) || incomingEdgeSet.has(e)) return 2.5;
+        return e.status in CG_STATUS_COLOR ? 2 : 1.4;
+      })
+      .attr("opacity", function (e) {
+        if (!focusedId) return e.kind === "caller" ? 0.6 : 1;
+        return outgoingEdgeSet.has(e) || incomingEdgeSet.has(e) ? 1 : CG_DIM_OPACITY;
+      })
+      .attr("marker-end", edgeMarker);
+
+    nodeG.select("circle").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth).attr("opacity", nodeOpacity);
+    nodeG.select("text").attr("opacity", nodeOpacity);
   }
 
   // Escape clears node selection and any active text selection (from
@@ -980,6 +1075,10 @@ function cgRenderGraph(container, data) {
     if (selectedIds.size) {
       selectedIds.clear();
       updateSelectionHighlight();
+    }
+    if (focusedId) {
+      focusedId = null;
+      updateFocusHighlight();
     }
     var sel = window.getSelection && window.getSelection();
     if (sel) sel.removeAllRanges();
@@ -1009,9 +1108,7 @@ function cgRenderGraph(container, data) {
     .attr("stroke-dasharray", function (id) {
       return nodesById[id].status === "removed" ? "3,2" : null;
     })
-    .attr("opacity", function (id) {
-      return nodesById[id].external || callerOnlyIds.has(id) ? 0.55 : 1;
-    })
+    .attr("opacity", nodeOpacity)
     .style("cursor", "grab");
 
   // Multi-line label via tspans (a plain .text() can't hold a line
@@ -1029,6 +1126,7 @@ function cgRenderGraph(container, data) {
       if (info.external || callerOnlyIds.has(id)) return "#8a8a92";
       return CG_STATUS_COLOR[info.status] || "#eee";
     })
+    .attr("opacity", nodeOpacity)
     .style("cursor", "text")
     .each(function (id) {
       var info = nodesById[id];
@@ -1172,13 +1270,20 @@ function cgRenderGraph(container, data) {
       var modifierHeld =
         event.sourceEvent &&
         (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey || event.sourceEvent.shiftKey);
-      if (!modifierHeld) return;
-      if (selectedIds.has(id)) {
-        selectedIds.delete(id);
-      } else {
-        selectedIds.add(id);
+      if (modifierHeld) {
+        if (selectedIds.has(id)) {
+          selectedIds.delete(id);
+        } else {
+          selectedIds.add(id);
+        }
+        updateSelectionHighlight();
+        return;
       }
-      updateSelectionHighlight();
+      // Plain click (no modifier, no drag): toggle this node's
+      // incoming/outgoing highlight; clicking the already-focused node
+      // again clears it.
+      focusedId = focusedId === id ? null : id;
+      updateFocusHighlight();
     });
   var nodeCircles = nodeG.select("circle");
   nodeCircles.call(nodeDrag);
@@ -1252,9 +1357,14 @@ function cgRenderGraph(container, data) {
   svg.call(selectDrag);
 
   svg.on("click", function (event) {
-    if (event.target === svg.node() && selectedIds.size) {
+    if (event.target !== svg.node()) return;
+    if (selectedIds.size) {
       selectedIds.clear();
       updateSelectionHighlight();
+    }
+    if (focusedId) {
+      focusedId = null;
+      updateFocusHighlight();
     }
   });
 
