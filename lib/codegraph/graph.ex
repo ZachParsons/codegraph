@@ -14,6 +14,10 @@ defmodule Codegraph.Graph do
     nearest root module, used by the UI to lay callers of the same module
     out at the same visual depth regardless of how many calls deep their
     own internal call structure goes.
+
+    `visibility` is `:public` for a `def`, `:private` for a `defp`, and
+    `nil` for a module node (`function: nil`) or an external one (never
+    analyzed, so its own visibility is unknown).
     """
     defstruct [
       :module,
@@ -25,7 +29,8 @@ defmodule Codegraph.Graph do
       :params,
       :spec_args,
       :spec_return,
-      :level
+      :level,
+      :visibility
     ]
 
     @type t :: %__MODULE__{
@@ -38,7 +43,8 @@ defmodule Codegraph.Graph do
             params: [String.t()] | nil,
             spec_args: [String.t()] | nil,
             spec_return: String.t() | nil,
-            level: non_neg_integer() | nil
+            level: non_neg_integer() | nil,
+            visibility: :public | :private | nil
           }
   end
 

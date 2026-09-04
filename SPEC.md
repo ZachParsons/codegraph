@@ -90,6 +90,11 @@ mix codegraph --root MyApp.Accounts --root MyApp.Billing --fdepth 6 --mdepth 2
   zoomed/collapsed to cluster level.
 - Node identity: functions are keyed by fully-qualified `Module.name/arity`;
   modules are keyed by their full name.
+- A function node's **shape** encodes visibility: a `def` renders as a
+  circle, a `defp` as a diamond. Deliberately not color/opacity — those
+  already carry status (added/removed/modified) and external/dimmed
+  state — and not position/grouping, since nodes can be dragged
+  independently of their module box.
 
 ### External calls (out-of-scope targets)
 

@@ -967,9 +967,36 @@ function cgRenderGraph(container, data) {
     .attr("marker-end", "url(#cg-arrow)");
 
   var nodeIds = Object.keys(pos);
+
+  // A node's marker shape is the ONLY thing that encodes def (circle) vs
+  // defp (diamond) — deliberately not color/opacity/stroke, since those
+  // channels already carry status, external-ness, and selection/focus,
+  // and a module's own box position can't be trusted for this once nodes
+  // are free to be dragged independently of it (see the click-to-focus
+  // comment below for the same reasoning applied to selection state).
+  // Both shapes are drawn via one <path> per node (d3.symbol), not a
+  // <circle> element, so every place below that reads/writes "the node's
+  // marker" uses a single selector regardless of which shape it is.
+  //
+  // Diamond size is bumped relative to circle: a diamond drawn at the
+  // same nominal area (d3.symbol's `size`) as a circle looks visibly
+  // smaller to the eye (its mass sits closer to the center), so this
+  // scales it up to read as roughly the same size on screen.
+  var CG_DIAMOND_SIZE_MULT = 1.6;
+
+  function cgNodeSymbolSize(id) {
+    var base = CG_STATUS_COLOR[nodesById[id].status] ? 201 : 154; // matches the old r=8/r=7 circle areas
+    return nodesById[id].visibility === "private" ? base * CG_DIAMOND_SIZE_MULT : base;
+  }
+
+  function cgNodeSymbolPath(id) {
+    var type = nodesById[id].visibility === "private" ? d3.symbolDiamond : d3.symbolCircle;
+    return d3.symbol().type(type).size(cgNodeSymbolSize(id))();
+  }
+
   // Rubber-band multi-select state. Selected nodes get a highlighted
   // stroke — nodeStroke()/nodeStrokeWidth() are shared by the initial
-  // circle creation below and by updateSelectionHighlight(), so both stay
+  // marker creation below and by updateSelectionHighlight(), so both stay
   // in sync instead of duplicating the same status/external logic twice.
   var selectedIds = new Set();
 
@@ -1010,7 +1037,7 @@ function cgRenderGraph(container, data) {
   }
 
   function updateSelectionHighlight() {
-    nodeG.select("circle").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
+    nodeG.select(".cg-node-marker").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
   }
 
   function edgeMarker(e) {
@@ -1061,7 +1088,7 @@ function cgRenderGraph(container, data) {
       })
       .attr("marker-end", edgeMarker);
 
-    nodeG.select("circle").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth).attr("opacity", nodeOpacity);
+    nodeG.select(".cg-node-marker").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth).attr("opacity", nodeOpacity);
     nodeG.select("text").attr("opacity", nodeOpacity);
   }
 
@@ -1094,10 +1121,9 @@ function cgRenderGraph(container, data) {
     });
 
   nodeG
-    .append("circle")
-    .attr("r", function (id) {
-      return CG_STATUS_COLOR[nodesById[id].status] ? 8 : 7;
-    })
+    .append("path")
+    .attr("class", "cg-node-marker")
+    .attr("d", cgNodeSymbolPath)
     .attr("fill", function (id) {
       var info = nodesById[id];
       if (info.external || callerOnlyIds.has(id)) return "#3a3a3f";
@@ -1172,11 +1198,11 @@ function cgRenderGraph(container, data) {
   }
   redraw();
 
-  // Drag handles are the circle/rect only, never the text — a drag
+  // Drag handles are the marker/rect only, never the text — a drag
   // behavior on an element swallows the mousedown+move gesture that
   // native browser text selection also needs, so attaching it to the
   // whole node/badge group (text included) made every label unselectable.
-  // .raise() targets the parent <g> (not just the circle/rect it's
+  // .raise() targets the parent <g> (not just the marker/rect it's
   // called on) so the whole node — text included — still comes to front
   // while being dragged.
   //
@@ -1285,8 +1311,8 @@ function cgRenderGraph(container, data) {
       focusedId = focusedId === id ? null : id;
       updateFocusHighlight();
     });
-  var nodeCircles = nodeG.select("circle");
-  nodeCircles.call(nodeDrag);
+  var nodeMarkers = nodeG.select(".cg-node-marker");
+  nodeMarkers.call(nodeDrag);
 
   clusters.select("rect").call(boxDrag);
 
@@ -1297,7 +1323,7 @@ function cgRenderGraph(container, data) {
   //
   // Also excludes text/tspan targets — without this, a mousedown starting
   // on a label (no longer caught by node/module drag above, now that
-  // those are circle/rect-only) would bubble up and start a pan instead,
+  // those are marker/rect-only) would bubble up and start a pan instead,
   // which would swallow the text-selection gesture just as effectively.
   zoom.filter(function (event) {
     var tag = event.target && event.target.tagName;

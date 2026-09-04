@@ -17,6 +17,34 @@ defmodule Codegraph.AnalyzerTest do
     assert Enum.any?(graph.nodes, &(&1.module == Foo and &1.function == :baz and &1.arity == 0))
   end
 
+  test "a multi-clause function is one node, not one per clause" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        def fmt(nil), do: "nil"
+        def fmt(x) when is_integer(x), do: Integer.to_string(x)
+        def fmt(_other), do: "?"
+      end
+      """)
+
+    assert Enum.count(graph.nodes, &(&1.function == :fmt and &1.arity == 1)) == 1
+  end
+
+  test "tags def as public and defp as private" do
+    graph =
+      Analyzer.analyze_source("""
+      defmodule Foo do
+        def bar(x), do: x
+        defp baz, do: :ok
+      end
+      """)
+
+    bar = Enum.find(graph.nodes, &(&1.function == :bar))
+    baz = Enum.find(graph.nodes, &(&1.function == :baz))
+    assert bar.visibility == :public
+    assert baz.visibility == :private
+  end
+
   test "finds local calls (parenthesized only)" do
     graph =
       Analyzer.analyze_source("""

@@ -133,6 +133,16 @@ defmodule Codegraph.Scope do
   def scope(%Graph{} = graph, roots, depth \\ 2, module_depth \\ :infinity) do
     root_modules = roots |> Enum.map(&root_module/1) |> MapSet.new()
 
+    # The canonical, fully-detailed Node for every identity the project
+    # graph knows about (params, @spec, visibility, ...) — an edge's own
+    # `from`/`to` (see Codegraph.Analyzer.maybe_add_edge/5) only ever
+    # carries the bare module/function/arity/external identity, so the BFS
+    # below tracks identity by KEY throughout and looks the real node back
+    # up here at the end, rather than accumulating whatever mix of
+    # bare-identity and fully-detailed structs it happened to encounter a
+    # given function through first.
+    nodes_by_key = Map.new(graph.nodes, &{node_key(&1), &1})
+
     edges_by_from =
       Enum.group_by(graph.edges, fn e -> {e.from.module, e.from.function, e.from.arity} end)
 
@@ -146,9 +156,10 @@ defmodule Codegraph.Scope do
     # assigned first wins, but the other interpretation still leaves a
     # real edge in the graph, which visibly conflicts with it in the UI.
     start = Enum.filter(graph.nodes, fn n -> n.function != nil and not n.external and matches_root?(n, roots) end)
+    start_keys = start |> Enum.map(&node_key/1) |> MapSet.new()
 
     acc = %{
-      node_set: MapSet.new(start),
+      node_keys: start_keys,
       node_list: start,
       edge_set: MapSet.new(),
       edge_list: [],
@@ -158,16 +169,19 @@ defmodule Codegraph.Scope do
 
     acc = bfs(start, edges_by_from, depth, module_depth, 0, acc)
 
-    caller_edges = caller_edges(graph, start, acc.node_set)
-    caller_nodes = caller_edges |> Enum.map(& &1.from) |> Enum.uniq()
+    caller_edges = caller_edges(graph, start, acc.node_keys)
+    caller_nodes = caller_edges |> Enum.map(& &1.from) |> Enum.uniq_by(&node_key/1)
 
     module_nodes =
       Enum.filter(graph.nodes, fn n -> is_nil(n.function) and MapSet.member?(root_modules, n.module) end)
 
     nodes =
       (acc.node_list ++ module_nodes ++ caller_nodes)
-      |> Enum.uniq()
-      |> Enum.map(&%{&1 | level: Map.get(acc.levels, node_key(&1))})
+      |> Enum.uniq_by(&node_key/1)
+      |> Enum.map(fn n ->
+        canonical = Map.get(nodes_by_key, node_key(n), n)
+        %{canonical | level: Map.get(acc.levels, node_key(n))}
+      end)
 
     %Graph{nodes: nodes, edges: acc.edge_list ++ caller_edges}
   end
@@ -175,17 +189,17 @@ defmodule Codegraph.Scope do
   # One hop backward from each root function only (not from BFS
   # descendants, and not recursively from the callers themselves) — a
   # caller that is itself a root, or that's already reachable forward
-  # from the roots (already `scoped_node_set`), is left out: it already
+  # from the roots (already `scoped_node_keys`), is left out: it already
   # has a place in the regular downward tree, so showing it a second time
   # above would just be confusing, not additional information.
-  defp caller_edges(%Graph{} = graph, start, scoped_node_set) do
+  defp caller_edges(%Graph{} = graph, start, scoped_node_keys) do
     root_keys = start |> Enum.map(&node_key/1) |> MapSet.new()
 
     graph.edges
     |> Enum.filter(fn e ->
       MapSet.member?(root_keys, node_key(e.to)) and
         not MapSet.member?(root_keys, node_key(e.from)) and
-        not MapSet.member?(scoped_node_set, e.from)
+        not MapSet.member?(scoped_node_keys, node_key(e.from))
     end)
     |> Enum.uniq()
     |> Enum.map(&%{&1 | kind: :caller})
@@ -248,12 +262,12 @@ defmodule Codegraph.Scope do
     new_nodes =
       new_edges
       |> Enum.map(& &1.to)
-      |> Enum.uniq()
-      |> Enum.reject(&MapSet.member?(acc.node_set, &1))
+      |> Enum.uniq_by(&node_key/1)
+      |> Enum.reject(&MapSet.member?(acc.node_keys, node_key(&1)))
 
     acc = %{
       acc
-      | node_set: Enum.reduce(new_nodes, acc.node_set, &MapSet.put(&2, &1)),
+      | node_keys: Enum.reduce(new_nodes, acc.node_keys, &MapSet.put(&2, node_key(&1))),
         node_list: acc.node_list ++ new_nodes,
         levels: Enum.reduce(new_nodes, acc.levels, &Map.put(&2, node_key(&1), next_round))
     }

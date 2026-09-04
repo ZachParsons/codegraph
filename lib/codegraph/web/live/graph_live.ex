@@ -89,7 +89,8 @@ defmodule Codegraph.Web.GraphLive do
       params: n.params,
       spec_args: n.spec_args,
       spec_return: n.spec_return,
-      level: n.level
+      level: n.level,
+      visibility: n.visibility
     }
   end
 

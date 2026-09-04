@@ -83,7 +83,7 @@ defmodule Codegraph.Analyzer do
 
     acc =
       walk(quoted, %{module: nil, function: nil, aliases: %{}}, %{
-        nodes: MapSet.new(),
+        nodes: %{},
         edges: [],
         specs: %{}
       })
@@ -93,7 +93,7 @@ defmodule Codegraph.Analyzer do
     # node here, once the whole file (and thus every @spec) has been seen.
     nodes =
       acc.nodes
-      |> MapSet.to_list()
+      |> Map.values()
       |> Enum.map(fn node ->
         case Map.get(acc.specs, {node.module, node.function, node.arity}) do
           nil -> node
@@ -142,7 +142,8 @@ defmodule Codegraph.Analyzer do
           external: false,
           status: :unchanged,
           hash: :erlang.phash2(body),
-          params: fun_params(head)
+          params: fun_params(head),
+          visibility: if(kind == :def, do: :public, else: :private)
         }
 
         acc = add_node(acc, node)
@@ -347,6 +348,17 @@ defmodule Codegraph.Analyzer do
 
   defp maybe_add_edge(acc, _ctx_without_function, _target_mod, _fun, _arity), do: acc
 
-  defp add_node(acc, node), do: %{acc | nodes: MapSet.put(acc.nodes, node)}
+  # Keyed by identity (module/function/arity), not full struct equality: a
+  # multi-clause function is walked once per clause (see the def/defp
+  # clause above), each producing its own Node with that clause's own
+  # params and body hash — without this, every clause past the first
+  # survived as a separate, visually-stacked duplicate node at the same
+  # graph position, arbitrarily overwriting each other client-side. The
+  # first clause encountered wins; a function's later clauses don't
+  # change its call-graph identity, so nothing is lost by only keeping one.
+  defp add_node(acc, node) do
+    key = {node.module, node.function, node.arity}
+    if Map.has_key?(acc.nodes, key), do: acc, else: %{acc | nodes: Map.put(acc.nodes, key, node)}
+  end
   defp add_edge(acc, edge), do: %{acc | edges: [edge | acc.edges]}
 end

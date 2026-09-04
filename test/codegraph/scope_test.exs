@@ -291,4 +291,29 @@ defmodule Codegraph.ScopeTest do
     refute Enum.any?(graph.nodes, &(&1.module == Vendored))
     refute Enum.any?(graph.nodes, &(&1.module == Compiled))
   end
+
+  test "a root that's also called by a sibling root stays one node at level 0, with its full detail" do
+    dir = Path.join(System.tmp_dir!(), "codegraph_scope_sibling_root_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    # A {:module, Root} root seeds EVERY function Root defines as a level-0
+    # root — including callee/1, which entry/1 (also a level-0 root) also
+    # calls. Before the fix, that internal call rediscovered callee/1 via
+    # BFS as a second, detail-less node and bumped its level to 1.
+    File.write!(Path.join(dir, "root.ex"), """
+    defmodule Root do
+      def entry(x), do: callee(x)
+      def callee(y), do: y
+    end
+    """)
+
+    graph = Scope.project_graph(["*.ex"], dir)
+    scoped = Scope.scope(graph, [{:module, Root}], 5)
+
+    callees = Enum.filter(scoped.nodes, &(&1.module == Root and &1.function == :callee))
+    assert [callee] = callees
+    assert callee.level == 0
+    assert callee.params == ["y"]
+  end
 end
