@@ -116,7 +116,7 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
-    '<span style="opacity:0.5; font-size:11px;">click a node to highlight its callers/calls · drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
+    '<span style="opacity:0.5; font-size:11px;">scroll/two-finger swipe to pan, pinch to zoom · click a node to highlight its callers/calls · drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
 
@@ -1325,10 +1325,41 @@ function cgRenderGraph(container, data) {
   // on a label (no longer caught by node/module drag above, now that
   // those are marker/rect-only) would bubble up and start a pan instead,
   // which would swallow the text-selection gesture just as effectively.
+  // This only governs drag/dblclick/touch gestures now — wheel gestures
+  // are filtered separately just below, since they need the opposite
+  // rule (pan everywhere, INCLUDING over text) rather than this one.
   zoom.filter(function (event) {
+    if (event.type === "wheel") return event.ctrlKey;
     var tag = event.target && event.target.tagName;
     var isText = tag === "text" || tag === "tspan";
-    return (!event.ctrlKey || event.type === "wheel") && !event.button && !event.shiftKey && !isText;
+    return !event.ctrlKey && !event.button && !event.shiftKey && !isText;
+  });
+
+  // Two-finger trackpad scroll (or a plain mouse wheel) always PANS, no
+  // matter what element it lands on — a node, a module box, or a label —
+  // unlike drag, which moves whatever it starts on. Chrome/Firefox mark a
+  // real pinch gesture (and ctrl+scroll) with ctrlKey on the wheel event
+  // specifically so it's distinguishable from an ordinary two-finger
+  // scroll; the filter above routes that case to d3.zoom's own built-in
+  // cursor-anchored scale handling instead, so only the non-pinch case
+  // reaches here.
+  //
+  // Registered on its own "wheel.pan" namespace (not "wheel", which
+  // svg.call(zoom) above already owns as "wheel.zoom") so both listeners
+  // run independently per event rather than one replacing the other.
+  //
+  // zoom.translateBy's own x/y are pre-scale units (it internally applies
+  // `+ k * x`), so screen-pixel wheel deltas are divided by currentZoomK
+  // first — same reasoning as the drag handlers' dx/currentZoomK above —
+  // to keep one wheel "tick" feeling like the same on-screen distance at
+  // any zoom level. Negated to match this app's existing drag-to-pan feel
+  // (and every other pannable-canvas tool's convention): scrolling down/
+  // right moves the CONTENT up/left, revealing more of what's below/right
+  // of the current view.
+  svg.on("wheel.pan", function (event) {
+    if (event.ctrlKey) return;
+    event.preventDefault();
+    zoom.translateBy(svg, -event.deltaX / currentZoomK, -event.deltaY / currentZoomK);
   });
 
   var selectionStart = null;
