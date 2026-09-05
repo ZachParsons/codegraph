@@ -2,6 +2,23 @@
 
 **TODO: Add description**
 
+## Screenshots
+
+Modules render as color-coded boxes, functions as nodes inside them —
+a circle for a public `def`, a diamond for a private `defp` — connected
+by call edges. External calls (including a root's own immediate
+callers, shown dashed above it) are drawn as boundary leaves without
+being expanded further:
+
+![Call graph: modules, public/private functions, and calls](docs/images/call-graph.png)
+
+`--diff BASE..HEAD` renders the same graph reconciled between two git
+refs, color-coding what changed — green for added, red for removed,
+amber for a function whose body changed, and the default color for
+anything unchanged:
+
+![Diff view: added, removed, and modified functions](docs/images/diff-view.png)
+
 ## Usage
 
 ```
