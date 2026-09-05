@@ -18,6 +18,10 @@ defmodule Codegraph.Web.Layouts do
         </script>
         <script defer src="/vendor/d3-dag.min.js">
         </script>
+        <script defer src="/js/graph_shared.js">
+        </script>
+        <script defer src="/js/graph_layout.js">
+        </script>
         <script defer src="/js/graph_hook.js">
         </script>
         <script defer src="/js/app.js">
