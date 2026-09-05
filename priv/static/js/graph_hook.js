@@ -156,31 +156,6 @@ function cgRenderGraph(container, data) {
     d3.zoomIdentity.translate(20, 20).scale(Math.max(fitScale, 0.03))
   );
 
-  var defs = svg.append("defs");
-  // Three arrowheads (default/outgoing/incoming), swapped per edge in
-  // updateFocusHighlight below — an SVG <marker> doesn't inherit its
-  // path's stroke color on its own, so matching the arrowhead to a
-  // focus-highlighted edge needs its own marker per color rather than one
-  // shared marker.
-  [
-    { id: "cg-arrow", color: "#8a8a92" },
-    { id: "cg-arrow-out", color: CG_OUTGOING_EDGE_COLOR },
-    { id: "cg-arrow-in", color: CG_INCOMING_EDGE_COLOR },
-  ].forEach(function (m) {
-    defs
-      .append("marker")
-      .attr("id", m.id)
-      .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 10)
-      .attr("refY", 0)
-      .attr("markerWidth", 6)
-      .attr("markerHeight", 6)
-      .attr("orient", "auto")
-      .append("path")
-      .attr("d", "M0,-5L10,0L0,5")
-      .attr("fill", m.color);
-  });
-
   var clusterLayer = root.append("g");
   var edgeLayer = root.append("g");
   var nodeLayer = root.append("g");
@@ -256,56 +231,116 @@ function cgRenderGraph(container, data) {
 
   var collapsed = {};
 
-  // Plain straight lines, not d3.linkVertical()'s curves — tried the
-  // curved version first, but it didn't earn its complexity over just
-  // drawing directly from node to node. d3-dag's own precomputed multi-
-  // point paths aren't usable regardless, straight or curved: dragging
-  // and the tidy-tree layout above move nodes independently of the
-  // original static sugiyama positions, so edges are recomputed live
-  // from current positions on every redraw.
-  // Stops short of both nodes' own centers, at each one's rendered
-  // boundary (plus a hair for its stroke) — otherwise the line ran all
-  // the way center-to-center, leaving it visible past the arrow tip and
-  // into the target node, and back through the source node's own origin
-  // out the other side, on any dimmed/translucent node (opacity < 1
-  // shows the line underneath straight through the fill).
-  function edgePathD(fromId, toId) {
+  // Edge objects (not just node ids) reachable from the focused node —
+  // membership is by object identity, which works because edgePaths'/
+  // edgeArrows' own data (edgeList.concat(callerEdgeList)) is these exact
+  // same objects. Declared here (not down by updateFocusHighlight, which
+  // repopulates them) so edgeStrokeColor/edgeStrokeWidth below can be the
+  // SAME functions used for both the initial render and every later
+  // focus-highlight update — referencing them before any focus exists is
+  // safe (both start empty, so every `.has(e)` below is simply false).
+  var outgoingEdgeSet = new Set();
+  var incomingEdgeSet = new Set();
+
+  function edgeStrokeColor(e) {
+    if (outgoingEdgeSet.has(e)) return CG_OUTGOING_EDGE_COLOR;
+    if (incomingEdgeSet.has(e)) return CG_INCOMING_EDGE_COLOR;
+    if (e.kind === "caller") return CG_CALLER_EDGE_COLOR;
+    return CG_STATUS_COLOR[e.status] || "#8a8a92";
+  }
+
+  function edgeStrokeWidth(e) {
+    if (outgoingEdgeSet.has(e) || incomingEdgeSet.has(e)) return 2.5;
+    return e.status in CG_STATUS_COLOR ? 2 : 1.4;
+  }
+
+  // `focusedId` isn't declared until further below (harmless — it's a
+  // plain var, so it's just `undefined`, same as falsy `null`, until
+  // then), which is why this can already be used for the initial render.
+  function edgeOpacity(e) {
+    if (!focusedId) return e.kind === "caller" ? 0.6 : 1;
+    return outgoingEdgeSet.has(e) || incomingEdgeSet.has(e) ? 1 : CG_DIM_OPACITY;
+  }
+
+  // Every edge is TWO shapes, not one path-with-marker-end: a line and an
+  // explicitly computed arrowhead triangle. An SVG <marker>'s own
+  // refX/markerUnits/viewBox scaling proved to be a persistent, hard-to-
+  // reason-about source of the arrow's tip landing somewhere other than
+  // exactly where the line was trimmed to — computing the triangle
+  // ourselves, from the same direction vector and stroke-width already
+  // driving the line, removes that indirection entirely: the tip is
+  // placed exactly on the target's boundary (touching it, not stopping
+  // short), and the line's own endpoint is exactly the arrow's back-
+  // center, so the two shapes meet with neither a gap nor an overlap.
+  //
+  // The source end still stops a hair short of ITS node's boundary (the
+  // "+ 1") — there's no arrowhead there to butt up against, so this just
+  // keeps the line from visibly running into that node's own stroke ring.
+  function edgeGeometry(fromId, toId, strokeWidth) {
     var a = pos[fromId],
       b = pos[toId];
-    if (!a || !b) return "";
+    if (!a || !b) return null;
     var dx = b.x - a.x,
       dy = b.y - a.y;
     var dist = Math.sqrt(dx * dx + dy * dy) || 1;
     var ux = dx / dist,
       uy = dy / dist;
+    var px = -uy,
+      py = ux;
     var ra = cgNodeBoundaryDist(fromId, ux, uy) + 1;
-    var rb = cgNodeBoundaryDist(toId, ux, uy) + 1;
     var sx = a.x + ux * ra,
       sy = a.y + uy * ra;
-    var tx = b.x - ux * rb,
-      ty = b.y - uy * rb;
-    return "M" + sx + "," + sy + "L" + tx + "," + ty;
+    var tipX = b.x - ux * cgNodeBoundaryDist(toId, ux, uy),
+      tipY = b.y - uy * cgNodeBoundaryDist(toId, ux, uy);
+    var arrowLen = 6 * strokeWidth,
+      halfWidth = 3 * strokeWidth;
+    var backX = tipX - ux * arrowLen,
+      backY = tipY - uy * arrowLen;
+    return {
+      sx: sx,
+      sy: sy,
+      backX: backX,
+      backY: backY,
+      tipX: tipX,
+      tipY: tipY,
+      leftX: backX + px * halfWidth,
+      leftY: backY + py * halfWidth,
+      rightX: backX - px * halfWidth,
+      rightY: backY - py * halfWidth,
+    };
+  }
+
+  function edgeLineD(e) {
+    var g = edgeGeometry(e.fromId, e.toId, edgeStrokeWidth(e));
+    return g ? "M" + g.sx + "," + g.sy + "L" + g.backX + "," + g.backY : "";
+  }
+
+  function edgeArrowD(e) {
+    var g = edgeGeometry(e.fromId, e.toId, edgeStrokeWidth(e));
+    return g ? "M" + g.tipX + "," + g.tipY + "L" + g.leftX + "," + g.leftY + "L" + g.rightX + "," + g.rightY + "Z" : "";
   }
 
   var edgePaths = edgeLayer
-    .selectAll("path")
+    .selectAll("path.cg-edge-line")
     .data(edgeList.concat(callerEdgeList))
     .join("path")
+    .attr("class", "cg-edge-line")
     .attr("fill", "none")
-    .attr("stroke", function (e) {
-      if (e.kind === "caller") return CG_CALLER_EDGE_COLOR;
-      return CG_STATUS_COLOR[e.status] || "#8a8a92";
-    })
-    .attr("stroke-width", function (e) {
-      return e.status in CG_STATUS_COLOR ? 2 : 1.4;
-    })
+    .attr("stroke", edgeStrokeColor)
+    .attr("stroke-width", edgeStrokeWidth)
     .attr("stroke-dasharray", function (e) {
       return e.status === "removed" ? "4,3" : null;
     })
-    .attr("opacity", function (e) {
-      return e.kind === "caller" ? 0.6 : 1;
-    })
-    .attr("marker-end", "url(#cg-arrow)");
+    .attr("opacity", edgeOpacity);
+
+  var edgeArrows = edgeLayer
+    .selectAll("path.cg-edge-arrow")
+    .data(edgeList.concat(callerEdgeList))
+    .join("path")
+    .attr("class", "cg-edge-arrow")
+    .attr("stroke", "none")
+    .attr("fill", edgeStrokeColor)
+    .attr("opacity", edgeOpacity);
 
   var nodeIds = Object.keys(pos);
 
@@ -350,14 +385,14 @@ function cgRenderGraph(container, data) {
 
   // Exact distance from a node's center to its own rendered boundary
   // along a given unit direction (ux, uy) — used to trim edges to the
-  // boundary instead of the center (see edgePathD above). A circle's
+  // boundary instead of the center (see edgeGeometry below). A circle's
   // boundary is the same distance in every direction; the diamond is a
   // true rotated square (see cgSymbolSquareDiamond just above), whose
   // |x| + |y| = r boundary sits at r / (|ux| + |uy|) along a unit
-  // direction — the standard L1-ball distance formula. edgePathD passes
-  // the same (ux, uy) for both the source and target node, which is only
-  // valid because both shapes are centrally symmetric: the boundary
-  // distance along a line is identical measured from either end.
+  // direction — the standard L1-ball distance formula. edgeGeometry
+  // passes the same (ux, uy) for both the source and target node, which
+  // is only valid because both shapes are centrally symmetric: the
+  // boundary distance along a line is identical measured from either end.
   function cgNodeBoundaryDist(id, ux, uy) {
     var size = cgNodeSymbolSize(id);
     if (nodesById[id].visibility === "private") {
@@ -418,18 +453,10 @@ function cgRenderGraph(container, data) {
     nodeG.select(".cg-node-marker").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
   }
 
-  function edgeMarker(e) {
-    if (outgoingEdgeSet.has(e)) return "url(#cg-arrow-out)";
-    if (incomingEdgeSet.has(e)) return "url(#cg-arrow-in)";
-    return "url(#cg-arrow)";
-  }
-
-  // Edge objects (not just node ids) reachable from the focused node —
-  // membership is by object identity, which works because edgePaths' own
-  // data (edgeList.concat(callerEdgeList)) is these exact same objects.
-  var outgoingEdgeSet = new Set();
-  var incomingEdgeSet = new Set();
-
+  // outgoingEdgeSet/incomingEdgeSet (used by edgeStrokeColor/edgeStrokeWidth/
+  // edgeOpacity above) are repopulated here from `focusedId` each time it
+  // changes; connectedOutIds/connectedInIds are the same idea for nodeStroke/
+  // nodeOpacity.
   function updateFocusHighlight() {
     outgoingEdgeSet = new Set();
     incomingEdgeSet = new Set();
@@ -449,22 +476,12 @@ function cgRenderGraph(container, data) {
       });
     }
 
-    edgePaths
-      .attr("stroke", function (e) {
-        if (outgoingEdgeSet.has(e)) return CG_OUTGOING_EDGE_COLOR;
-        if (incomingEdgeSet.has(e)) return CG_INCOMING_EDGE_COLOR;
-        if (e.kind === "caller") return CG_CALLER_EDGE_COLOR;
-        return CG_STATUS_COLOR[e.status] || "#8a8a92";
-      })
-      .attr("stroke-width", function (e) {
-        if (outgoingEdgeSet.has(e) || incomingEdgeSet.has(e)) return 2.5;
-        return e.status in CG_STATUS_COLOR ? 2 : 1.4;
-      })
-      .attr("opacity", function (e) {
-        if (!focusedId) return e.kind === "caller" ? 0.6 : 1;
-        return outgoingEdgeSet.has(e) || incomingEdgeSet.has(e) ? 1 : CG_DIM_OPACITY;
-      })
-      .attr("marker-end", edgeMarker);
+    // Both shapes' geometry is recomputed too, not just color/opacity —
+    // a focused edge's stroke-width changes (see edgeStrokeWidth), and
+    // the arrowhead's size (and thus the line's own endpoint, its back-
+    // center) is derived from that same stroke-width.
+    edgePaths.attr("d", edgeLineD).attr("stroke", edgeStrokeColor).attr("stroke-width", edgeStrokeWidth).attr("opacity", edgeOpacity);
+    edgeArrows.attr("d", edgeArrowD).attr("fill", edgeStrokeColor).attr("opacity", edgeOpacity);
 
     nodeG.select(".cg-node-marker").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth).attr("opacity", nodeOpacity);
     nodeG.select("text").attr("opacity", nodeOpacity);
@@ -569,9 +586,8 @@ function cgRenderGraph(container, data) {
       return "translate(" + p.x + "," + p.y + ")";
     });
 
-    edgePaths.attr("d", function (e) {
-      return edgePathD(e.fromId, e.toId);
-    });
+    edgePaths.attr("d", edgeLineD);
+    edgeArrows.attr("d", edgeArrowD);
 
     clusters.each(function (id) {
       var r = boxRect(id);
