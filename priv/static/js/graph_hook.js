@@ -428,6 +428,13 @@ function cgRenderGraph(container, data) {
   // need explicit padding.
   var TREE_GAP = 24;
 
+  // A caller-of-the-root box (see the caller-layout pass further down) is
+  // keyed by this prefix + its module name, rather than the bare module
+  // name a downward-tree box uses, so the two can never collide/merge —
+  // declared up here (not down where it's first needed) so layoutModule
+  // below, which every box's layout runs through, can share it too.
+  var CG_CALLER_BOX_PREFIX = "caller:";
+
   // A box's DRAWN rectangle (see boxRect further down) is its content
   // plus this padding on every side (BOX_PAD_TOP is taller, to leave
   // room for the module-name label at the top). Defined here — not down
@@ -538,7 +545,16 @@ function cgRenderGraph(container, data) {
     // time — left every drawn rectangle wider than what TREE_GAP had
     // actually set aside for it, so adjacent boxes' rectangles
     // overlapped even where the underlying node positions didn't.
-    var labelWidth = cgBoxLabelWidth(mod);
+    // A caller box's own key carries the "caller:" prefix (see
+    // CG_CALLER_BOX_PREFIX above) so it can't collide with a downward-tree
+    // box for the same module — but the LABEL actually drawn (see
+    // boxModule further down) is just the bare module name, so the width
+    // reserved for it here has to strip the prefix too, or every caller
+    // box would reserve several extra characters' worth of width it never
+    // draws.
+    var labelWidth = cgBoxLabelWidth(
+      mod.indexOf(CG_CALLER_BOX_PREFIX) === 0 ? mod.slice(CG_CALLER_BOX_PREFIX.length) : mod
+    );
     var halfContent = contentWidth / 2;
     var boxLeft = -halfContent - BOX_PAD_X;
     var boxRight = Math.max(halfContent + BOX_PAD_X, -halfContent + labelWidth);
@@ -646,99 +662,107 @@ function cgRenderGraph(container, data) {
 
   // Callers of the root(s) — exactly one generation, never fed through
   // sugiyama or the downward contour merge above (see callerOnlyIds) —
-  // get their own row placed directly above the root they call, entirely
-  // by hand: pack each root's callers into a row centered on that root's
-  // now-final x, in call order, then resolve left-right overlap BETWEEN
-  // different roots' caller rows by shifting a later row rightward. A
-  // root's own x never moves for this, only its callers shift, so a
-  // crowded caller row can end up off-center under its root — an
-  // acceptable trade-off for leaving the already-finalized downward tree
-  // layout completely undisturbed by this separate upward pass. A caller
-  // shared by more than one root is placed once, under whichever root
-  // claims it first.
-  var callersByRoot = {};
+  // are grouped into one box per MODULE (e.g. two different Broadway
+  // wrapper functions both calling into Broadway.Topology share one
+  // dashed box, not two), same as the downward tree gets. Each such box
+  // reuses layoutModule for its own flat vertical list (a caller box
+  // never has module-tree "exits" of its own — see moduleChildrenOf, only
+  // ever populated from the downward tree — so that call always takes
+  // its simple, no-recursion path) and the same mergeChildrenLeftToRight
+  // used for every other sibling-box placement, so two caller boxes can
+  // never overlap each other.
+  //
+  // The whole caller layer is then placed as its own row a full
+  // (1 + MODULE_GAP_ROWS) * ROW_HEIGHT above `treeMinY` — the topmost
+  // point of the ENTIRE downward tree computed just below, not merely
+  // whichever root a given caller happens to call — so a caller box can
+  // never overlap a downward-tree box either, regardless of which
+  // (possibly deeply-nested) function within that tree it calls. A
+  // caller shared by more than one root is placed once, under whichever
+  // root claims it first.
+  var treeIds = Object.keys(pos);
+  var treeMinX = Math.min.apply(
+    null,
+    treeIds.map(function (id) {
+      return pos[id].x;
+    })
+  );
+  var treeMaxX = Math.max.apply(
+    null,
+    treeIds.map(function (id) {
+      return pos[id].x;
+    })
+  );
+  var treeMinY = Math.min.apply(
+    null,
+    treeIds.map(function (id) {
+      return pos[id].y;
+    })
+  );
+
+  var callerModuleMembers = {};
   var callerClaimedBy = {};
   callerEdgeList.forEach(function (e) {
     if (!pos[e.toId] || callerClaimedBy[e.fromId] !== undefined) return;
     callerClaimedBy[e.fromId] = e.toId;
-    (callersByRoot[e.toId] = callersByRoot[e.toId] || []).push(e.fromId);
+    var mod = nodesById[e.fromId].module;
+    (callerModuleMembers[mod] = callerModuleMembers[mod] || []).push(e.fromId);
   });
 
-  var callerRows = Object.keys(callersByRoot).map(function (rootId) {
-    var callerIds = callersByRoot[rootId];
-    var widths = callerIds.map(function (id) {
-      return Math.max(cgLabelWidth(nodesById[id]), 120);
-    });
-    var totalWidth =
-      widths.reduce(function (a, b) {
-        return a + b;
-      }, 0) +
-      TREE_GAP * (callerIds.length - 1);
-    var startX = pos[rootId].x - totalWidth / 2;
-    var xs = [];
-    var cursor = startX;
-    widths.forEach(function (w) {
-      xs.push(cursor + w / 2);
-      cursor += w + TREE_GAP;
-    });
-    return {
-      callerIds: callerIds,
-      xs: xs,
-      y: pos[rootId].y - (1 + MODULE_GAP_ROWS) * ROW_HEIGHT,
-      left: startX,
-      right: cursor - TREE_GAP,
-    };
-  });
-
-  callerRows.sort(function (a, b) {
-    return a.left - b.left;
-  });
-  var callerRowPrevRight = -Infinity;
-  callerRows.forEach(function (row) {
-    var shift = Math.max(0, callerRowPrevRight + TREE_GAP - row.left);
-    if (shift > 0) {
-      row.xs = row.xs.map(function (x) {
-        return x + shift;
-      });
-      row.left += shift;
-      row.right += shift;
-    }
-    callerRowPrevRight = row.right;
-  });
-
-  callerRows.forEach(function (row) {
-    row.callerIds.forEach(function (id, i) {
-      pos[id] = { x: row.xs[i], y: row.y };
-    });
-  });
-
-  // Callers never went through module-based box assignment above (they're
-  // placed by hand, right above) — grouped into one box per MODULE here
-  // instead, same as the downward tree, so two callers from the same
-  // module (e.g. two different Broadway wrapper functions each calling
-  // into Broadway.Topology) share one dashed box rather than each
-  // getting its own. Keyed with a prefix distinct from a plain module
-  // name, so a caller box never collides with — or merges into — that
-  // module's own downward-tree box (a caller is dimmed/implicit context —
-  // see callerOnlyIds — genuinely a different thing to show than the real
-  // tree, even on the rare occasion its module coincides). This also
-  // sweeps up any other id with a position but no box yet, for the same
-  // reason.
-  var CG_CALLER_BOX_PREFIX = "caller:";
-  Object.keys(pos).forEach(function (id) {
-    if (!boxOf[id]) {
-      var key = CG_CALLER_BOX_PREFIX + nodesById[id].module;
+  var callerBoxKeys = Object.keys(callerModuleMembers).map(function (mod) {
+    var key = CG_CALLER_BOX_PREFIX + mod;
+    // Reversed so the first-called caller lands nearest the top of its
+    // box — layoutModule always gives its LAST member the row closest to
+    // `treeMinY` (see the y formula below), which for this upward-
+    // growing layer is the row nearest the tree, mirroring the downward
+    // tree's own call-order-top-to-bottom convention.
+    boxMembers[key] = callerModuleMembers[mod].slice().reverse();
+    boxMembers[key].forEach(function (id) {
       boxOf[id] = key;
-      (boxMembers[key] = boxMembers[key] || []).push(id);
-    }
+    });
+    return key;
   });
+
+  if (callerBoxKeys.length) {
+    var callerLayouts = callerBoxKeys.map(layoutModule);
+    var callerMerged = mergeChildrenLeftToRight(callerLayouts);
+
+    var callerLeftVals = Object.keys(callerMerged.combinedLeft).map(function (row) {
+      return callerMerged.combinedLeft[row];
+    });
+    var callerRightVals = Object.keys(callerMerged.combinedRight).map(function (row) {
+      return callerMerged.combinedRight[row];
+    });
+    var callerLayerCenterX =
+      (Math.min.apply(null, callerLeftVals) + Math.max.apply(null, callerRightVals)) / 2;
+    var xShift = (treeMinX + treeMaxX) / 2 - callerLayerCenterX;
+    var callerLayerBaseY = treeMinY - (1 + MODULE_GAP_ROWS) * ROW_HEIGHT;
+
+    callerBoxKeys.forEach(function (key, i) {
+      var cl = callerLayouts[i];
+      var offset = callerMerged.offsets[i] + xShift;
+      Object.keys(cl.relX).forEach(function (id) {
+        pos[id] = {
+          x: cl.relX[id] + offset,
+          y: callerLayerBaseY - cl.relY[id] * ROW_HEIGHT,
+        };
+      });
+    });
+  }
 
   // Every box's members already came from `pos` by construction (module
-  // boxes via the spanning tree, caller boxes via the sweep above), so
-  // there's nothing to filter out here — unlike a boxId's own node-id
-  // form, which the old per-chain boxes had and this doesn't (a module
-  // box is keyed by its module name, not a node id, so `pos[id]` would
-  // always (wrongly) read as absent for it).
+  // boxes via the spanning tree, caller boxes via the module-grouping
+  // above) — this sweep is purely a defensive fallback in case some other
+  // id ever reaches `pos` without a box, not a path anything currently
+  // takes. Its own singleton (id-keyed) boxes are why the next line reads
+  // `boxIds = Object.keys(boxMembers)` rather than filtering anything.
+  Object.keys(pos).forEach(function (id) {
+    if (!boxOf[id]) {
+      boxOf[id] = id;
+      boxMembers[id] = [id];
+    }
+  });
+
   var boxIds = Object.keys(boxMembers);
   // A module-keyed box's id literally IS its module name; a caller box's
   // id carries the prefix stripped off above instead, so its module name
@@ -883,7 +907,7 @@ function cgRenderGraph(container, data) {
       .append("marker")
       .attr("id", m.id)
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 17)
+      .attr("refX", 10)
       .attr("refY", 0)
       .attr("markerWidth", 6)
       .attr("markerHeight", 6)
@@ -951,11 +975,23 @@ function cgRenderGraph(container, data) {
   // and the tidy-tree layout above move nodes independently of the
   // original static sugiyama positions, so edges are recomputed live
   // from current positions on every redraw.
+  // Stops short of the target node's own center, at its rendered
+  // boundary (plus a hair for its stroke) — otherwise the line ran all
+  // the way to the center while the arrowhead marker sat further back
+  // along it (refX pulling it off the endpoint), leaving a stray stub of
+  // line visible past the arrow tip and into the node, especially
+  // visible through dimmed/translucent nodes.
   function edgePathD(fromId, toId) {
     var a = pos[fromId],
       b = pos[toId];
     if (!a || !b) return "";
-    return "M" + a.x + "," + a.y + "L" + b.x + "," + b.y;
+    var dx = b.x - a.x,
+      dy = b.y - a.y;
+    var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    var r = cgNodeRadius(toId) + 1;
+    var tx = b.x - (dx / dist) * r;
+    var ty = b.y - (dy / dist) * r;
+    return "M" + a.x + "," + a.y + "L" + tx + "," + ty;
   }
 
   var edgePaths = edgeLayer
@@ -999,6 +1035,13 @@ function cgRenderGraph(container, data) {
   function cgNodeSymbolSize(id) {
     var base = CG_STATUS_COLOR[nodesById[id].status] ? 201 : 154; // matches the old r=8/r=7 circle areas
     return nodesById[id].visibility === "private" ? base * CG_DIAMOND_SIZE_MULT : base;
+  }
+
+  // Approximate on-screen radius of a node's marker (circle or diamond),
+  // derived from its d3.symbol area — used to trim edges to the node's
+  // boundary instead of its center (see edgePathD below).
+  function cgNodeRadius(id) {
+    return Math.sqrt(cgNodeSymbolSize(id) / Math.PI);
   }
 
   function cgNodeSymbolPath(id) {
