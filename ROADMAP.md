@@ -16,6 +16,9 @@ end-to-end, not just one layer deeper. See SPEC.md for design details.
 - [x] External/out-of-scope calls as greyed boundary nodes
 - [x] D3.js + d3-dag layered rendering of the graph in-browser
 - [x] Basic interactions: search/filter, click to collapse a module cluster
+- [x] Distinguish public/private functions visually (circle vs diamond node shape)
+- [x] Click a node to highlight its callers/callees, distinctly colored
+- [x] Drag nodes and module boxes to rearrange, individually or as a multi-select
 
 ## Diff view (use case 2)
 
@@ -29,6 +32,7 @@ end-to-end, not just one layer deeper. See SPEC.md for design details.
 - [ ] Optional `mix xref` enrichment pass for the current compiled revision
 - [x] Dogfood: add as a dep to a real external repo, verify `mix codegraph` there
 - [x] Handle indirect/dynamic calls gracefully (mark unresolved, don't crash)
+- [x] Hide Erlang/OTP + Elixir stdlib calls by default, toggleable
 
 ## Later (not yet scheduled)
 
