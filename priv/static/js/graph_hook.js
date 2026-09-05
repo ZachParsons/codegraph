@@ -975,12 +975,12 @@ function cgRenderGraph(container, data) {
   // and the tidy-tree layout above move nodes independently of the
   // original static sugiyama positions, so edges are recomputed live
   // from current positions on every redraw.
-  // Stops short of the target node's own center, at its rendered
+  // Stops short of both nodes' own centers, at each one's rendered
   // boundary (plus a hair for its stroke) — otherwise the line ran all
-  // the way to the center while the arrowhead marker sat further back
-  // along it (refX pulling it off the endpoint), leaving a stray stub of
-  // line visible past the arrow tip and into the node, especially
-  // visible through dimmed/translucent nodes.
+  // the way center-to-center, leaving it visible past the arrow tip and
+  // into the target node, and back through the source node's own origin
+  // out the other side, on any dimmed/translucent node (opacity < 1
+  // shows the line underneath straight through the fill).
   function edgePathD(fromId, toId) {
     var a = pos[fromId],
       b = pos[toId];
@@ -988,10 +988,15 @@ function cgRenderGraph(container, data) {
     var dx = b.x - a.x,
       dy = b.y - a.y;
     var dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    var r = cgNodeRadius(toId) + 1;
-    var tx = b.x - (dx / dist) * r;
-    var ty = b.y - (dy / dist) * r;
-    return "M" + a.x + "," + a.y + "L" + tx + "," + ty;
+    var ux = dx / dist,
+      uy = dy / dist;
+    var ra = cgNodeRadius(fromId) + 1;
+    var rb = cgNodeRadius(toId) + 1;
+    var sx = a.x + ux * ra,
+      sy = a.y + uy * ra;
+    var tx = b.x - ux * rb,
+      ty = b.y - uy * rb;
+    return "M" + sx + "," + sy + "L" + tx + "," + ty;
   }
 
   var edgePaths = edgeLayer
@@ -1274,18 +1279,92 @@ function cgRenderGraph(container, data) {
   // screen pixels, not data-space units, so they're divided by the
   // current zoom scale (currentZoomK) before being applied to `pos` —
   // 1 screen pixel is 1/currentZoomK data units once zoomed in or out.
+  // Rubber-band select state/helpers, shared by every drag behavior below
+  // (boxDrag, nodeDrag, selectDrag) — shift held at drag-start means
+  // "select an area", full stop, no matter which element the gesture
+  // started on. Previously only a drag starting on truly empty canvas
+  // reached this (via selectDrag, attached to the svg itself); a shift+
+  // drag starting on a module box's rect or a node's marker was instead
+  // captured by that element's own boxDrag/nodeDrag listener — neither of
+  // which checked for shiftKey — so it moved the box/node instead of
+  // selecting. Each of those now checks shiftKey at "start" and, when
+  // held, delegates every step of the gesture to these three functions
+  // instead of its normal move behavior.
+  var selectionStart = null;
+  var selectionRectEl = null;
+
+  function rbStart(event) {
+    selectionStart = d3.pointer(event, root.node());
+    selectionRectEl = root
+      .append("rect")
+      .attr("x", selectionStart[0])
+      .attr("y", selectionStart[1])
+      .attr("width", 0)
+      .attr("height", 0)
+      .attr("fill", "#4f9dff")
+      .attr("fill-opacity", 0.12)
+      .attr("stroke", "#4f9dff")
+      .attr("stroke-width", 1)
+      .attr("pointer-events", "none");
+  }
+
+  function rbDrag(event) {
+    var p = d3.pointer(event, root.node());
+    var x = Math.min(selectionStart[0], p[0]);
+    var y = Math.min(selectionStart[1], p[1]);
+    selectionRectEl
+      .attr("x", x)
+      .attr("y", y)
+      .attr("width", Math.abs(p[0] - selectionStart[0]))
+      .attr("height", Math.abs(p[1] - selectionStart[1]));
+  }
+
+  function rbEnd(event) {
+    var p = d3.pointer(event, root.node());
+    var x0 = Math.min(selectionStart[0], p[0]),
+      x1 = Math.max(selectionStart[0], p[0]);
+    var y0 = Math.min(selectionStart[1], p[1]),
+      y1 = Math.max(selectionStart[1], p[1]);
+
+    selectedIds.clear();
+    nodeIds.forEach(function (id) {
+      var np = pos[id];
+      if (np.x >= x0 && np.x <= x1 && np.y >= y0 && np.y <= y1) selectedIds.add(id);
+    });
+
+    selectionRectEl.remove();
+    selectionRectEl = null;
+    updateSelectionHighlight();
+  }
+
   var boxDrag = d3
     .drag()
     .container(function () {
       return svg.node();
     })
     .clickDistance(6)
-    .on("start", function () {
+    .on("start", function (event) {
+      if (event.sourceEvent && event.sourceEvent.shiftKey) {
+        this._cgRubberBand = true;
+        rbStart(event);
+        return;
+      }
+      this._cgRubberBand = false;
       d3.select(this.parentNode).raise();
     })
     .on("drag", function (event, id) {
+      if (this._cgRubberBand) {
+        rbDrag(event);
+        return;
+      }
       translateBox(id, event.dx / currentZoomK, event.dy / currentZoomK);
       redraw();
+    })
+    .on("end", function (event) {
+      if (this._cgRubberBand) {
+        rbEnd(event);
+        this._cgRubberBand = false;
+      }
     });
 
   // Individual nodes are draggable too, independent of their box (which
@@ -1321,11 +1400,20 @@ function cgRenderGraph(container, data) {
       return !event.button;
     })
     .on("start", function (event, id) {
-      d3.select(this.parentNode).raise();
       this._cgDragged = false;
-      var modifierHeld =
-        event.sourceEvent &&
-        (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey || event.sourceEvent.shiftKey);
+      // Shift always means "select an area", even starting on a node —
+      // see the rubber-band block above boxDrag. A plain shift+click
+      // (no movement) still falls through to the toggle-selection logic
+      // in "end" below, once the (harmlessly empty) selection rect this
+      // creates is torn back down there.
+      if (event.sourceEvent && event.sourceEvent.shiftKey) {
+        this._cgRubberBand = true;
+        rbStart(event);
+        return;
+      }
+      this._cgRubberBand = false;
+      d3.select(this.parentNode).raise();
+      var modifierHeld = event.sourceEvent && (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey);
       if (!modifierHeld && !selectedIds.has(id)) {
         selectedIds.clear();
         updateSelectionHighlight();
@@ -1333,6 +1421,10 @@ function cgRenderGraph(container, data) {
     })
     .on("drag", function (event, id) {
       this._cgDragged = true;
+      if (this._cgRubberBand) {
+        rbDrag(event);
+        return;
+      }
       var dx = event.dx / currentZoomK;
       var dy = event.dy / currentZoomK;
       if (selectedIds.has(id) && selectedIds.size > 1) {
@@ -1347,6 +1439,18 @@ function cgRenderGraph(container, data) {
       redraw();
     })
     .on("end", function (event, id) {
+      var wasRubberBand = this._cgRubberBand;
+      this._cgRubberBand = false;
+      if (wasRubberBand && this._cgDragged) {
+        rbEnd(event);
+        return;
+      }
+      if (wasRubberBand && selectionRectEl) {
+        // Shift+click, no movement: drop the zero-size rect started in
+        // "start" and fall through to the toggle logic below.
+        selectionRectEl.remove();
+        selectionRectEl = null;
+      }
       if (this._cgDragged) return;
       var modifierHeld =
         event.sourceEvent &&
@@ -1371,7 +1475,9 @@ function cgRenderGraph(container, data) {
 
   clusters.select("rect").call(boxDrag);
 
-  // Rubber-band select: shift+drag on empty canvas draws a selection box;
+  // Rubber-band select: shift+drag anywhere — empty canvas, a module box,
+  // or a node — draws a selection box (boxDrag/nodeDrag above delegate to
+  // the same rbStart/rbDrag/rbEnd used here when they see shiftKey);
   // every node whose center falls inside it becomes draggable as a group
   // (via nodeDrag above). Shift is required so this doesn't fight the
   // existing plain-drag-to-pan behavior on the same background.
@@ -1417,55 +1523,14 @@ function cgRenderGraph(container, data) {
     zoom.translateBy(svg, -event.deltaX / currentZoomK, -event.deltaY / currentZoomK);
   });
 
-  var selectionStart = null;
-  var selectionRectEl = null;
-
   var selectDrag = d3
     .drag()
     .filter(function (event) {
       return event.shiftKey;
     })
-    .on("start", function (event) {
-      selectionStart = d3.pointer(event, root.node());
-      selectionRectEl = root
-        .append("rect")
-        .attr("x", selectionStart[0])
-        .attr("y", selectionStart[1])
-        .attr("width", 0)
-        .attr("height", 0)
-        .attr("fill", "#4f9dff")
-        .attr("fill-opacity", 0.12)
-        .attr("stroke", "#4f9dff")
-        .attr("stroke-width", 1)
-        .attr("pointer-events", "none");
-    })
-    .on("drag", function (event) {
-      var p = d3.pointer(event, root.node());
-      var x = Math.min(selectionStart[0], p[0]);
-      var y = Math.min(selectionStart[1], p[1]);
-      selectionRectEl
-        .attr("x", x)
-        .attr("y", y)
-        .attr("width", Math.abs(p[0] - selectionStart[0]))
-        .attr("height", Math.abs(p[1] - selectionStart[1]));
-    })
-    .on("end", function (event) {
-      var p = d3.pointer(event, root.node());
-      var x0 = Math.min(selectionStart[0], p[0]),
-        x1 = Math.max(selectionStart[0], p[0]);
-      var y0 = Math.min(selectionStart[1], p[1]),
-        y1 = Math.max(selectionStart[1], p[1]);
-
-      selectedIds.clear();
-      nodeIds.forEach(function (id) {
-        var np = pos[id];
-        if (np.x >= x0 && np.x <= x1 && np.y >= y0 && np.y <= y1) selectedIds.add(id);
-      });
-
-      selectionRectEl.remove();
-      selectionRectEl = null;
-      updateSelectionHighlight();
-    });
+    .on("start", rbStart)
+    .on("drag", rbDrag)
+    .on("end", rbEnd);
   svg.call(selectDrag);
 
   svg.on("click", function (event) {
