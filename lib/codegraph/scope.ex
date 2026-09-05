@@ -281,6 +281,57 @@ defmodule Codegraph.Scope do
   defp resolve_edge(%Edge{} = edge, defined_functions) do
     to = edge.to
     external = not MapSet.member?(defined_functions, {to.module, to.function, to.arity})
-    %{edge | from: %{edge.from | external: false}, to: %{to | external: external}}
+    stdlib = external and stdlib_module?(to.module)
+    %{edge | from: %{edge.from | external: false}, to: %{to | external: external, stdlib: stdlib}}
+  end
+
+  @doc """
+  Whether `module` is part of the Erlang/OTP or Elixir installation itself
+  (`Enum`, `Keyword`, `Kernel`, `:lists`, ...) rather than a third-party
+  dependency or a module this tool analyzed. Detected by where the
+  module's compiled code actually lives on disk — under the Erlang
+  installation's own root (`:code.root_dir/0`, covers `:stdlib`,
+  `:kernel`, `:crypto`, etc.) or the sibling `lib/` directory Elixir
+  itself ships from (covers `Kernel`, `Enum`, `Logger`, `EEx`, `Mix`,
+  `ExUnit`, ...) — rather than a hardcoded list of module or application
+  names, which would need updating every time either ships something
+  new. A dependency fetched via `mix deps.get`, or a module this tool
+  actually analyzed, lives under the current project's own `_build`
+  directory instead, so it never matches either root.
+
+  `:erlang` itself is a special case: it's preloaded into the VM rather
+  than living at a path on disk, so `:code.which/1` reports it as
+  `:preloaded` instead of a beam file location.
+  """
+  @spec stdlib_module?(module()) :: boolean()
+  def stdlib_module?(module) when is_atom(module) do
+    case :code.which(module) do
+      :preloaded -> true
+      path when is_list(path) -> stdlib_path?(List.to_string(path))
+      _ -> false
+    end
+  end
+
+  def stdlib_module?(_), do: false
+
+  defp stdlib_path?(path) do
+    String.starts_with?(path, erlang_root()) or String.starts_with?(path, elixir_lib_root())
+  end
+
+  defp erlang_root, do: :code.root_dir() |> List.to_string()
+
+  # Kernel's own beam path looks like ".../elixir-x.y.z/lib/elixir/ebin/
+  # Elixir.Kernel.beam" — three levels up from there is the "lib" directory
+  # Elixir installs every one of its own applications into as siblings
+  # (elixir, eex, logger, mix, iex, ex_unit, ...), so this covers all of
+  # them without naming any of them individually.
+  defp elixir_lib_root do
+    case :code.which(Kernel) do
+      path when is_list(path) ->
+        path |> List.to_string() |> Path.dirname() |> Path.dirname() |> Path.dirname()
+
+      _ ->
+        ""
+    end
   end
 end

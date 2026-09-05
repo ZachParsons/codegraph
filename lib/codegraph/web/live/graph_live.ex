@@ -85,6 +85,7 @@ defmodule Codegraph.Web.GraphLive do
       function: n.function,
       arity: n.arity,
       external: n.external,
+      stdlib: n.stdlib,
       status: n.status,
       params: n.params,
       spec_args: n.spec_args,

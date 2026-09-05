@@ -105,6 +105,15 @@ var cgEscListener = null;
 // well enough, and the extra line is clutter until you need it.
 var cgShowModuleLabels = false;
 
+// Whether nodes flagged `stdlib` (Erlang/OTP or Elixir's own modules —
+// see Codegraph.Scope.stdlib_module?/1) are hidden, toggled from the
+// toolbar checkbox below. Same module-scope persistence as
+// cgShowModuleLabels above. Defaults to ON: this tool exists to surface
+// architecture in the project's OWN code, and a call like `Enum.map/2`
+// is rarely part of that — left on by default, every such call would
+// otherwise add a same-named leaf node cluttering the graph.
+var cgHideStdlib = true;
+
 function cgRenderGraph(container, data) {
   container.innerHTML = "";
   if (cgEscListener) {
@@ -126,11 +135,15 @@ function cgRenderGraph(container, data) {
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
     '<label style="display:flex; align-items:center; gap:4px; font-size:11px; opacity:0.8; cursor:pointer;">' +
     '<input type="checkbox" id="cg-module-label-toggle">module names</label>' +
+    '<label style="display:flex; align-items:center; gap:4px; font-size:11px; opacity:0.8; cursor:pointer;">' +
+    '<input type="checkbox" id="cg-stdlib-toggle">hide stdlib</label>' +
     '<span style="opacity:0.5; font-size:11px;">scroll/two-finger swipe to pan, pinch to zoom · click a node to highlight its callers/calls · drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
   var moduleLabelToggle = toolbar.querySelector("#cg-module-label-toggle");
   moduleLabelToggle.checked = cgShowModuleLabels;
+  var stdlibToggle = toolbar.querySelector("#cg-stdlib-toggle");
+  stdlibToggle.checked = cgHideStdlib;
 
   var nodesById = {};
   data.nodes
@@ -1667,11 +1680,16 @@ function cgRenderGraph(container, data) {
     }
   });
 
+  function isHiddenStdlib(id) {
+    return cgHideStdlib && !!(nodesById[id] && nodesById[id].stdlib);
+  }
+
   function applyFilters() {
     var query = (searchInput.value || "").toLowerCase();
 
     nodeG.style("display", function (id) {
       if (collapsed[boxOf[id]]) return "none";
+      if (isHiddenStdlib(id)) return "none";
       if (query && id.toLowerCase().indexOf(query) === -1) return "none";
       return null;
     });
@@ -1680,6 +1698,8 @@ function cgRenderGraph(container, data) {
       var hide =
         collapsed[boxOf[e.fromId]] ||
         collapsed[boxOf[e.toId]] ||
+        isHiddenStdlib(e.fromId) ||
+        isHiddenStdlib(e.toId) ||
         (query &&
           e.fromId.toLowerCase().indexOf(query) === -1 &&
           e.toId.toLowerCase().indexOf(query) === -1);
@@ -1690,6 +1710,15 @@ function cgRenderGraph(container, data) {
       var base = isCallerBox(id) ? 0.5 : 1;
       return collapsed[id] ? 0.35 * base : base;
     });
+
+    // A stdlib module (Enum, Keyword, ...) gets one box shared by every
+    // call to it (see boxOf assignment above) — once every member of
+    // that box is hidden by the toggle, hide the now-empty box shell
+    // too rather than leaving a floating labeled rectangle with nothing
+    // in it.
+    clusters.style("display", function (id) {
+      return boxMembers[id].every(isHiddenStdlib) ? "none" : null;
+    });
   }
 
   searchInput.addEventListener("input", applyFilters);
@@ -1698,6 +1727,17 @@ function cgRenderGraph(container, data) {
     cgShowModuleLabels = moduleLabelToggle.checked;
     nodeG.selectAll(".cg-module-label").style("display", cgShowModuleLabels ? null : "none");
   });
+
+  stdlibToggle.addEventListener("change", function () {
+    cgHideStdlib = stdlibToggle.checked;
+    applyFilters();
+  });
+
+  // Applies cgHideStdlib's default (and any collapsed/search state
+  // already carried over from cgShowModuleLabels-style module-scope
+  // persistence) as soon as the graph is built, rather than only after
+  // the first toolbar interaction.
+  applyFilters();
 }
 
 window.CodegraphHooks.GraphViz = {

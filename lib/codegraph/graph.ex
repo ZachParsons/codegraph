@@ -18,6 +18,13 @@ defmodule Codegraph.Graph do
     `visibility` is `:public` for a `def`, `:private` for a `defp`, and
     `nil` for a module node (`function: nil`) or an external one (never
     analyzed, so its own visibility is unknown).
+
+    `stdlib` is true for an external node whose module resolves (via
+    `Codegraph.Scope.stdlib_module?/1`) to the Erlang/OTP or Elixir
+    installation itself, as opposed to a third-party dependency — the
+    UI hides these by default, since a call like `Enum.map/2` is rarely
+    the architectural insight this tool exists to surface. Always false
+    for a node this tool actually analyzed (`external: false`).
     """
     defstruct [
       :module,
@@ -30,7 +37,8 @@ defmodule Codegraph.Graph do
       :spec_args,
       :spec_return,
       :level,
-      :visibility
+      :visibility,
+      stdlib: false
     ]
 
     @type t :: %__MODULE__{
@@ -44,7 +52,8 @@ defmodule Codegraph.Graph do
             spec_args: [String.t()] | nil,
             spec_return: String.t() | nil,
             level: non_neg_integer() | nil,
-            visibility: :public | :private | nil
+            visibility: :public | :private | nil,
+            stdlib: boolean()
           }
   end
 
