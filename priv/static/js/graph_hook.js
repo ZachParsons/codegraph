@@ -1026,8 +1026,8 @@ function cgRenderGraph(container, data) {
     var dist = Math.sqrt(dx * dx + dy * dy) || 1;
     var ux = dx / dist,
       uy = dy / dist;
-    var ra = cgNodeRadius(fromId) + 1;
-    var rb = cgNodeRadius(toId) + 1;
+    var ra = cgNodeBoundaryDist(fromId, ux, uy) + 1;
+    var rb = cgNodeBoundaryDist(toId, ux, uy) + 1;
     var sx = a.x + ux * ra,
       sy = a.y + uy * ra;
     var tx = b.x - ux * rb,
@@ -1078,15 +1078,45 @@ function cgRenderGraph(container, data) {
     return nodesById[id].visibility === "private" ? base * CG_DIAMOND_SIZE_MULT : base;
   }
 
-  // Approximate on-screen radius of a node's marker (circle or diamond),
-  // derived from its d3.symbol area — used to trim edges to the node's
-  // boundary instead of its center (see edgePathD below).
-  function cgNodeRadius(id) {
-    return Math.sqrt(cgNodeSymbolSize(id) / Math.PI);
+  // A true rotated square (equal half-width/half-height), NOT d3's own
+  // symbolDiamond — that built-in shape is a taller rhombus (~1.73x
+  // height:width), which visibly obscured/overlapped the incoming call
+  // edge: the edge-trimming below assumed a roughly circular boundary,
+  // so on the built-in shape's much taller points the trimmed edge (and
+  // its arrowhead) landed well inside the visible diamond instead of at
+  // its tip.
+  var cgSymbolSquareDiamond = {
+    draw: function (context, size) {
+      var r = Math.sqrt(size / 2);
+      context.moveTo(0, -r);
+      context.lineTo(r, 0);
+      context.lineTo(0, r);
+      context.lineTo(-r, 0);
+      context.closePath();
+    },
+  };
+
+  // Exact distance from a node's center to its own rendered boundary
+  // along a given unit direction (ux, uy) — used to trim edges to the
+  // boundary instead of the center (see edgePathD above). A circle's
+  // boundary is the same distance in every direction; the diamond is a
+  // true rotated square (see cgSymbolSquareDiamond just above), whose
+  // |x| + |y| = r boundary sits at r / (|ux| + |uy|) along a unit
+  // direction — the standard L1-ball distance formula. edgePathD passes
+  // the same (ux, uy) for both the source and target node, which is only
+  // valid because both shapes are centrally symmetric: the boundary
+  // distance along a line is identical measured from either end.
+  function cgNodeBoundaryDist(id, ux, uy) {
+    var size = cgNodeSymbolSize(id);
+    if (nodesById[id].visibility === "private") {
+      var r = Math.sqrt(size / 2);
+      return r / (Math.abs(ux) + Math.abs(uy) || 1);
+    }
+    return Math.sqrt(size / Math.PI);
   }
 
   function cgNodeSymbolPath(id) {
-    var type = nodesById[id].visibility === "private" ? d3.symbolDiamond : d3.symbolCircle;
+    var type = nodesById[id].visibility === "private" ? cgSymbolSquareDiamond : d3.symbolCircle;
     return d3.symbol().type(type).size(cgNodeSymbolSize(id))();
   }
 
