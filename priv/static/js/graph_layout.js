@@ -15,6 +15,18 @@ function cgComputeLayout(data) {
       nodesById[cgNodeId(n)] = n;
     });
 
+  // A module's own diff status (from its `defmodule` node, `function:
+  // null`) — read directly rather than inferred from its member
+  // functions' own statuses, since a module with a few modified
+  // functions among many unchanged ones is the common case and does NOT
+  // mean the whole module was added or removed. Only meaningful (used by
+  // the box-background highlight in graph_hook.js) when it's `"added"`
+  // or `"removed"`: the module itself didn't exist on one side at all.
+  var moduleStatus = {};
+  data.nodes.forEach(function (n) {
+    if (!n.function) moduleStatus[n.module] = n.status;
+  });
+
   // Caller edges (kind "caller", added by Codegraph.Scope for each root's
   // own immediate callers) never enter d3-dag's graph: they're not part
   // of the downward call tree sugiyama lays out, and a node reachable
@@ -677,6 +689,7 @@ function cgComputeLayout(data) {
     boxMembers: boxMembers,
     boxIds: boxIds,
     boxModule: boxModule,
+    moduleStatus: moduleStatus,
     isCallerBox: isCallerBox,
     color: color,
   };

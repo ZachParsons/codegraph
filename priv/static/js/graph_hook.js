@@ -44,6 +44,7 @@ function cgRenderGraph(container, data) {
   var boxMembers = L.boxMembers;
   var boxIds = L.boxIds;
   var boxModule = L.boxModule;
+  var moduleStatus = L.moduleStatus;
   var isCallerBox = L.isCallerBox;
   var color = L.color;
 
@@ -174,12 +175,49 @@ function cgRenderGraph(container, data) {
   // already exist the moment they first run.
   var selectedBoxIds = new Set();
 
+  // A box's own diff status, for the green/red/orange background this
+  // drives below (see boxFill) — distinct from an individual member
+  // node's own status. "added"/"removed" mean the whole module didn't
+  // exist on one side at all (moduleStatus, from its own `defmodule`
+  // node — see graph_layout.js). Anything less than that — the module
+  // persists on both sides, but at least one member changed — reads as
+  // "modified" instead of tinting the whole box by inferring from
+  // members' own statuses directly, since "a few functions changed among
+  // many unchanged ones" is the common case and is exactly what
+  // "modified" (not "added"/"removed") is meant to convey at the box
+  // level.
+  function boxStatus(id) {
+    var mod = boxModule[id];
+    var wholeModule = moduleStatus[mod];
+    if (wholeModule === "added" || wholeModule === "removed") return wholeModule;
+    var changed = boxMembers[id].some(function (memberId) {
+      var n = nodesById[memberId];
+      return n && n.status && n.status !== "unchanged";
+    });
+    return changed ? "modified" : null;
+  }
+
   function boxStroke(id) {
-    return selectedBoxIds.has(id) ? "#4f9dff" : color(boxModule[id]);
+    if (selectedBoxIds.has(id)) return "#4f9dff";
+    return CG_STATUS_COLOR[boxStatus(id)] || color(boxModule[id]);
   }
 
   function boxStrokeWidth(id) {
-    return selectedBoxIds.has(id) ? 3 : 1.2;
+    if (selectedBoxIds.has(id)) return 3;
+    return CG_STATUS_COLOR[boxStatus(id)] ? 2.5 : 1.2;
+  }
+
+  // The box's background fill: a status-colored tint (dark, categorical
+  // fill's usual look, when nothing in it changed) rather than a border
+  // alone — the ask this answers was specifically that a status color
+  // confined to a thin stroke line doesn't "stand out" against a graph
+  // this dense.
+  function boxFill(id) {
+    return CG_STATUS_COLOR[boxStatus(id)] || "#16161c";
+  }
+
+  function boxFillOpacity(id) {
+    return CG_STATUS_COLOR[boxStatus(id)] ? 0.22 : 0.5;
   }
 
   function updateBoxSelectionHighlight() {
@@ -202,8 +240,8 @@ function cgRenderGraph(container, data) {
   clusters
     .append("rect")
     .attr("rx", 8)
-    .attr("fill", "#16161c")
-    .attr("fill-opacity", 0.5)
+    .attr("fill", boxFill)
+    .attr("fill-opacity", boxFillOpacity)
     .attr("stroke", boxStroke)
     .attr("stroke-width", boxStrokeWidth)
     .attr("stroke-dasharray", function (id) {
@@ -251,7 +289,7 @@ function cgRenderGraph(container, data) {
 
   function edgeStrokeWidth(e) {
     if (outgoingEdgeSet.has(e) || incomingEdgeSet.has(e)) return 2.5;
-    return e.status in CG_STATUS_COLOR ? 2 : 1.4;
+    return e.status in CG_STATUS_COLOR ? 3 : 1.4;
   }
 
   // `focusedId` isn't declared until further below (harmless — it's a
@@ -485,6 +523,7 @@ function cgRenderGraph(container, data) {
 
     nodeG.select(".cg-node-marker").attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth).attr("opacity", nodeOpacity);
     nodeG.select("text").attr("opacity", nodeOpacity);
+    nodeG.select(".cg-node-highlight").attr("opacity", nodeOpacity);
   }
 
   // Escape clears node selection and any active text selection (from
@@ -517,6 +556,37 @@ function cgRenderGraph(container, data) {
     .join("g")
     .attr("data-module", function (id) {
       return nodesById[id].module;
+    });
+
+  // A status-colored background band behind the marker + label, for
+  // added/removed/modified nodes — a status color confined to the small
+  // marker shape (and tinted label text) didn't stand out against a
+  // graph this dense. Appended (and thus painted) before the marker/text
+  // below, and deliberately NOT gated on external/callerOnlyIds the way
+  // the marker's own fill is: an implicit one-hop caller of the current
+  // root is still a real node that changed, and dimming it to gray
+  // (see the marker fill just below) shouldn't also hide that. Sized
+  // from the same cgLabelWidth/NODE_HALF_ROW the box layout itself
+  // reserves for this node, so the band roughly matches its slot without
+  // needing its own DOM measurement.
+  nodeG
+    .append("rect")
+    .attr("class", "cg-node-highlight")
+    .attr("x", -18)
+    .attr("y", -NODE_HALF_ROW + 2)
+    .attr("width", function (id) {
+      return Math.max(cgLabelWidth(nodesById[id]), 120) - 4;
+    })
+    .attr("height", NODE_HALF_ROW * 2 - 4)
+    .attr("rx", 4)
+    .attr("fill", function (id) {
+      return CG_STATUS_COLOR[nodesById[id].status] || "none";
+    })
+    .attr("fill-opacity", 0.22)
+    .attr("opacity", nodeOpacity)
+    .attr("pointer-events", "none")
+    .style("display", function (id) {
+      return CG_STATUS_COLOR[nodesById[id].status] ? null : "none";
     });
 
   nodeG
