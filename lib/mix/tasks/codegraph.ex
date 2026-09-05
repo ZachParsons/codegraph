@@ -124,8 +124,12 @@ defmodule Mix.Tasks.Codegraph do
     Process.sleep(:infinity)
   end
 
-  defp parse_depth("infinity"), do: :infinity
-  defp parse_depth(n), do: String.to_integer(n)
+  # Public (not `defp`) so a test can pin the parsing behavior directly,
+  # without booting the endpoint via `run/1`. Not part of the CLI's own
+  # public contract, hence `@doc false`.
+  @doc false
+  def parse_depth("infinity"), do: :infinity
+  def parse_depth(n), do: String.to_integer(n)
 
   # `--diff` walks git history via `Codegraph.GitSource`, which shells out
   # `git ls-tree`/`git show` from a `cwd` those commands expect to already
@@ -137,7 +141,8 @@ defmodule Mix.Tasks.Codegraph do
   # source from anywhere, not just when invoked from inside that repo.
   # `path` itself doesn't move: it's rewritten to be relative to the
   # resolved root, since that's what `git show <ref>:<path>` expects.
-  defp diff_root(path) do
+  @doc false
+  def diff_root(path) do
     expanded = Path.expand(path)
 
     case System.cmd("git", ["rev-parse", "--show-toplevel"], cd: expanded, stderr_to_stdout: true) do
@@ -155,7 +160,8 @@ defmodule Mix.Tasks.Codegraph do
   # names can't end in "/N", so there's no ambiguity to resolve.
   @root_function_pattern ~r/^(.+)\.([^.\/]+)\/(\d+)$/
 
-  defp parse_root(str) do
+  @doc false
+  def parse_root(str) do
     case Regex.run(@root_function_pattern, str) do
       [_, mod_str, fun_str, arity_str] ->
         {:function, Module.concat([mod_str]), String.to_atom(fun_str), String.to_integer(arity_str)}
