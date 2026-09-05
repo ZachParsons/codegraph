@@ -921,6 +921,32 @@ function cgRenderGraph(container, data) {
   var edgeLayer = root.append("g");
   var nodeLayer = root.append("g");
 
+  // Additive/subtractive multi-select for whole module boxes, same idea
+  // as nodes' selectedIds (see below) — shift/ctrl/cmd+click toggles a
+  // box in or out of selectedBoxIds, and dragging any box that's part of
+  // a multi-box selection moves every selected box together (see boxDrag
+  // below). A separate set from nodes' selectedIds since the two
+  // selections are independent: nodes and boxes are dragged by different
+  // handles and moved by different code (pos[id] vs translateBox(boxId)).
+  // Declared here, ahead of the rect creation just below, since
+  // boxStroke()/boxStrokeWidth() are used as that rect's own initial
+  // stroke/stroke-width accessors as well as by
+  // updateBoxSelectionHighlight() later — both need selectedBoxIds to
+  // already exist the moment they first run.
+  var selectedBoxIds = new Set();
+
+  function boxStroke(id) {
+    return selectedBoxIds.has(id) ? "#4f9dff" : color(boxModule[id]);
+  }
+
+  function boxStrokeWidth(id) {
+    return selectedBoxIds.has(id) ? 3 : 1.2;
+  }
+
+  function updateBoxSelectionHighlight() {
+    clusters.select("rect").attr("stroke", boxStroke).attr("stroke-width", boxStrokeWidth);
+  }
+
   // One rectangle per box — one per module in the downward tree (see box
   // assignment above), plus one per caller (kept separate — see
   // boxModule above). A caller box (see callerOnlyIds) is dimmed and
@@ -939,10 +965,8 @@ function cgRenderGraph(container, data) {
     .attr("rx", 8)
     .attr("fill", "#16161c")
     .attr("fill-opacity", 0.5)
-    .attr("stroke", function (id) {
-      return color(boxModule[id]);
-    })
-    .attr("stroke-width", 1.2)
+    .attr("stroke", boxStroke)
+    .attr("stroke-width", boxStrokeWidth)
     .attr("stroke-dasharray", function (id) {
       return isCallerBox(id) ? "3,3" : null;
     })
@@ -1163,6 +1187,10 @@ function cgRenderGraph(container, data) {
       selectedIds.clear();
       updateSelectionHighlight();
     }
+    if (selectedBoxIds.size) {
+      selectedBoxIds.clear();
+      updateBoxSelectionHighlight();
+    }
     if (focusedId) {
       focusedId = null;
       updateFocusHighlight();
@@ -1342,8 +1370,20 @@ function cgRenderGraph(container, data) {
     .container(function () {
       return svg.node();
     })
+    // d3.drag's default filter rejects ctrl-held gestures outright
+    // (`!event.ctrlKey && !event.button`) — see the identical note on
+    // nodeDrag below for why that matters: without overriding it,
+    // ctrl+click-to-toggle a box's selection would never even reach
+    // "start"/"end" here.
+    .filter(function (event) {
+      return !event.button;
+    })
     .clickDistance(6)
-    .on("start", function (event) {
+    .on("start", function (event, id) {
+      this._cgDragged = false;
+      // Shift always means "select an area" (see the rubber-band block
+      // above) — even a shift+click with no movement just tears back
+      // down the (harmlessly empty) rect it starts here, in "end" below.
       if (event.sourceEvent && event.sourceEvent.shiftKey) {
         this._cgRubberBand = true;
         rbStart(event);
@@ -1351,19 +1391,53 @@ function cgRenderGraph(container, data) {
       }
       this._cgRubberBand = false;
       d3.select(this.parentNode).raise();
+      var modifierHeld = event.sourceEvent && (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey);
+      if (!modifierHeld && !selectedBoxIds.has(id)) {
+        selectedBoxIds.clear();
+        updateBoxSelectionHighlight();
+      }
     })
     .on("drag", function (event, id) {
+      this._cgDragged = true;
       if (this._cgRubberBand) {
         rbDrag(event);
         return;
       }
-      translateBox(id, event.dx / currentZoomK, event.dy / currentZoomK);
+      var dx = event.dx / currentZoomK;
+      var dy = event.dy / currentZoomK;
+      if (selectedBoxIds.has(id) && selectedBoxIds.size > 1) {
+        selectedBoxIds.forEach(function (bid) {
+          translateBox(bid, dx, dy);
+        });
+      } else {
+        translateBox(id, dx, dy);
+      }
       redraw();
     })
-    .on("end", function (event) {
-      if (this._cgRubberBand) {
+    .on("end", function (event, id) {
+      var wasRubberBand = this._cgRubberBand;
+      this._cgRubberBand = false;
+      if (wasRubberBand && this._cgDragged) {
         rbEnd(event);
-        this._cgRubberBand = false;
+        return;
+      }
+      if (wasRubberBand && selectionRectEl) {
+        // Shift+click, no movement: drop the zero-size rect started in
+        // "start" and fall through to the toggle logic below.
+        selectionRectEl.remove();
+        selectionRectEl = null;
+      }
+      if (this._cgDragged) return;
+      var modifierHeld =
+        event.sourceEvent &&
+        (event.sourceEvent.ctrlKey || event.sourceEvent.metaKey || event.sourceEvent.shiftKey);
+      if (modifierHeld) {
+        if (selectedBoxIds.has(id)) {
+          selectedBoxIds.delete(id);
+        } else {
+          selectedBoxIds.add(id);
+        }
+        updateBoxSelectionHighlight();
       }
     });
 
@@ -1538,6 +1612,10 @@ function cgRenderGraph(container, data) {
     if (selectedIds.size) {
       selectedIds.clear();
       updateSelectionHighlight();
+    }
+    if (selectedBoxIds.size) {
+      selectedBoxIds.clear();
+      updateBoxSelectionHighlight();
     }
     if (focusedId) {
       focusedId = null;
