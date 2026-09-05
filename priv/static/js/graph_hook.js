@@ -949,16 +949,26 @@ function cgRenderGraph(container, data) {
       return null;
     });
 
-    edgePaths.style("display", function (e) {
-      var hide =
+    // The arrowhead is a separate shape from the line now (see
+    // edgeGeometry above), not a marker-end riding along on the line's
+    // own element — both need this same display toggle, or a hidden
+    // edge's line disappears while its arrowhead is left floating with
+    // nothing attached to it.
+    function edgeHidden(e) {
+      return !!(
         collapsed[boxOf[e.fromId]] ||
         collapsed[boxOf[e.toId]] ||
         isHiddenStdlib(e.fromId) ||
         isHiddenStdlib(e.toId) ||
-        (query &&
-          e.fromId.toLowerCase().indexOf(query) === -1 &&
-          e.toId.toLowerCase().indexOf(query) === -1);
-      return hide ? "none" : null;
+        (query && e.fromId.toLowerCase().indexOf(query) === -1 && e.toId.toLowerCase().indexOf(query) === -1)
+      );
+    }
+
+    edgePaths.style("display", function (e) {
+      return edgeHidden(e) ? "none" : null;
+    });
+    edgeArrows.style("display", function (e) {
+      return edgeHidden(e) ? "none" : null;
     });
 
     clusters.style("opacity", function (id) {
