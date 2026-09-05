@@ -713,18 +713,23 @@ function cgRenderGraph(container, data) {
   });
 
   // Callers never went through module-based box assignment above (they're
-  // placed by hand, right above) — each one becomes its own singleton
-  // box here, keyed by its own node id rather than its module, so a
-  // caller never merges into the SAME box as that module's one downward-
-  // tree location (a caller is dimmed/implicit context — see
-  // callerOnlyIds — genuinely a different thing to show than the real
+  // placed by hand, right above) — grouped into one box per MODULE here
+  // instead, same as the downward tree, so two callers from the same
+  // module (e.g. two different Broadway wrapper functions each calling
+  // into Broadway.Topology) share one dashed box rather than each
+  // getting its own. Keyed with a prefix distinct from a plain module
+  // name, so a caller box never collides with — or merges into — that
+  // module's own downward-tree box (a caller is dimmed/implicit context —
+  // see callerOnlyIds — genuinely a different thing to show than the real
   // tree, even on the rare occasion its module coincides). This also
   // sweeps up any other id with a position but no box yet, for the same
   // reason.
+  var CG_CALLER_BOX_PREFIX = "caller:";
   Object.keys(pos).forEach(function (id) {
     if (!boxOf[id]) {
-      boxOf[id] = id;
-      boxMembers[id] = [id];
+      var key = CG_CALLER_BOX_PREFIX + nodesById[id].module;
+      boxOf[id] = key;
+      (boxMembers[key] = boxMembers[key] || []).push(id);
     }
   });
 
@@ -735,15 +740,22 @@ function cgRenderGraph(container, data) {
   // box is keyed by its module name, not a node id, so `pos[id]` would
   // always (wrongly) read as absent for it).
   var boxIds = Object.keys(boxMembers);
-  // A module-keyed box's id literally IS its module name; a caller's
-  // singleton box is keyed by its own node id instead (see the sweep
-  // above), so its module has to come from nodesById. nodesById is never
-  // keyed by a bare module name (every real entry is
-  // "Module.function/arity"), so this distinguishes the two unambiguously.
+  // A module-keyed box's id literally IS its module name; a caller box's
+  // id carries the prefix stripped off above instead, so its module name
+  // is recovered from that rather than from nodesById (a caller box can
+  // have more than one member, so there's no single node id to look it
+  // up from).
   var boxModule = {};
   boxIds.forEach(function (id) {
-    boxModule[id] = nodesById[id] ? nodesById[id].module : id;
+    boxModule[id] = id.indexOf(CG_CALLER_BOX_PREFIX) === 0 ? id.slice(CG_CALLER_BOX_PREFIX.length) : id;
   });
+
+  // A BOX id's "is this caller context" check — distinct from
+  // callerOnlyIds, which is a set of individual NODE ids and answers the
+  // same question for a single node, not a (possibly multi-member) box.
+  function isCallerBox(boxId) {
+    return boxId.indexOf(CG_CALLER_BOX_PREFIX) === 0;
+  }
   var moduleNames = Array.from(
     new Set(
       boxIds.map(function (id) {
@@ -895,7 +907,7 @@ function cgRenderGraph(container, data) {
     .data(boxIds)
     .join("g")
     .style("opacity", function (id) {
-      return callerOnlyIds.has(id) ? 0.5 : 1;
+      return isCallerBox(id) ? 0.5 : 1;
     });
 
   clusters
@@ -908,7 +920,7 @@ function cgRenderGraph(container, data) {
     })
     .attr("stroke-width", 1.2)
     .attr("stroke-dasharray", function (id) {
-      return callerOnlyIds.has(id) ? "3,3" : null;
+      return isCallerBox(id) ? "3,3" : null;
     })
     .style("cursor", "grab");
 
@@ -1445,7 +1457,7 @@ function cgRenderGraph(container, data) {
     });
 
     clusters.style("opacity", function (id) {
-      var base = callerOnlyIds.has(id) ? 0.5 : 1;
+      var base = isCallerBox(id) ? 0.5 : 1;
       return collapsed[id] ? 0.35 * base : base;
     });
   }
