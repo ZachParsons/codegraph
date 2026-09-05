@@ -97,6 +97,14 @@ var CG_DIM_OPACITY = 0.1;
 // over that render's now-stale selectedIds/updateSelectionHighlight.
 var cgEscListener = null;
 
+// Whether each node's small module-name line is shown, toggled from the
+// toolbar checkbox below. Tracked at module scope (not local to
+// cgRenderGraph) so the choice survives a re-render (filter change, diff
+// reload, etc.) instead of resetting to the default every time. Defaults
+// to off — most of the time the node's color already ties it to a module
+// well enough, and the extra line is clutter until you need it.
+var cgShowModuleLabels = false;
+
 function cgRenderGraph(container, data) {
   container.innerHTML = "";
   if (cgEscListener) {
@@ -116,9 +124,13 @@ function cgRenderGraph(container, data) {
     '<input type="text" placeholder="filter by module or function…" ' +
     'style="background:#16161c; color:#eee; border:1px solid #333; border-radius:6px; ' +
     'padding:4px 8px; font-family:ui-monospace,monospace; font-size:12px; width:280px;">' +
+    '<label style="display:flex; align-items:center; gap:4px; font-size:11px; opacity:0.8; cursor:pointer;">' +
+    '<input type="checkbox" id="cg-module-label-toggle">module names</label>' +
     '<span style="opacity:0.5; font-size:11px;">scroll/two-finger swipe to pan, pinch to zoom · click a node to highlight its callers/calls · drag a node, or a module\'s label to move all its nodes · shift+drag to select an area, shift or ctrl/cmd+click to select one at a time, esc to clear · click a label to collapse</span>';
   container.appendChild(toolbar);
   var searchInput = toolbar.querySelector("input");
+  var moduleLabelToggle = toolbar.querySelector("#cg-module-label-toggle");
+  moduleLabelToggle.checked = cgShowModuleLabels;
 
   var nodesById = {};
   data.nodes
@@ -1248,10 +1260,12 @@ function cgRenderGraph(container, data) {
 
       text
         .append("tspan")
+        .attr("class", "cg-module-label")
         .attr("x", 11)
         .attr("dy", -3)
         .attr("font-size", 9)
         .attr("fill", info.external || callerOnlyIds.has(id) ? "#666" : color(info.module))
+        .style("display", cgShowModuleLabels ? null : "none")
         .text(cgModuleShort(info.module));
 
       cgLabelLines(info).forEach(function (line, i) {
@@ -1649,6 +1663,11 @@ function cgRenderGraph(container, data) {
   }
 
   searchInput.addEventListener("input", applyFilters);
+
+  moduleLabelToggle.addEventListener("change", function () {
+    cgShowModuleLabels = moduleLabelToggle.checked;
+    nodeG.selectAll(".cg-module-label").style("display", cgShowModuleLabels ? null : "none");
+  });
 }
 
 window.CodegraphHooks.GraphViz = {
