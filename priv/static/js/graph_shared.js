@@ -102,11 +102,14 @@ var CG_STATUS_COLOR = {
 var CG_CALLER_EDGE_COLOR = "#5a5a66"; // dim/halftone — the caller tree above the root is implicit context, not the primary call tree
 
 // Click-to-focus colors: a clicked node's INCOMING edges/callers (purple)
-// vs OUTGOING edges/callees (orange) — deliberately far from the status
+// vs OUTGOING edges/callees (yellow) — deliberately clear of the status
 // palette above (green/red/amber) and the multi-select blue, so all four
-// meanings stay visually distinct at once.
+// meanings stay visually distinct at once. The outgoing color's red and
+// green channels are kept equal — a true hue-60 yellow — rather than
+// leaning red/warm the way `modified`'s amber (#d29922) does, which read
+// as too close to orange at a glance.
 var CG_INCOMING_EDGE_COLOR = "#a78bfa";
-var CG_OUTGOING_EDGE_COLOR = "#ffa94d";
+var CG_OUTGOING_EDGE_COLOR = "#d6d600";
 var CG_DIM_OPACITY = 0.1;
 
 // Escape clears both node selection and any active browser text
