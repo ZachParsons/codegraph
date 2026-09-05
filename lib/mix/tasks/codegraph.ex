@@ -29,10 +29,12 @@ defmodule Mix.Tasks.Codegraph do
   `_build/` are always excluded even if they fall underneath it — so
   pointing `--path` at a whole package root (rather than just its `lib/`)
   is safe and won't pull in vendored dependency source. `--diff` renders
-  the diff between two git refs (e.g.
-  `main..HEAD`) instead of the working tree, and requires `--path` to
-  stay relative and inside the current git repo (it walks git history,
-  not the filesystem).
+  the diff between two git refs (e.g. `main..HEAD`) instead of the
+  working tree — it walks git history via `--path`'s own repository
+  (found via `git rev-parse --show-toplevel`, so `--path` may still be
+  absolute or escape the current project) rather than the filesystem, so
+  the refs must exist in THAT repo, not necessarily the one `mix
+  codegraph` was invoked from.
   """
   use Mix.Task
 
@@ -82,9 +84,11 @@ defmodule Mix.Tasks.Codegraph do
           end
       end
 
+    {cwd, glob_path} = if diff, do: diff_root(path), else: {File.cwd!(), path}
+
     Application.put_env(:codegraph, :cli_opts,
-      globs: [Path.join(path, "**/*.ex")],
-      cwd: File.cwd!(),
+      globs: [Path.join(glob_path, "**/*.ex")],
+      cwd: cwd,
       roots: roots,
       depth: depth,
       module_depth: module_depth,
@@ -122,6 +126,29 @@ defmodule Mix.Tasks.Codegraph do
 
   defp parse_depth("infinity"), do: :infinity
   defp parse_depth(n), do: String.to_integer(n)
+
+  # `--diff` walks git history via `Codegraph.GitSource`, which shells out
+  # `git ls-tree`/`git show` from a `cwd` those commands expect to already
+  # be inside the target repo. Resolving that `cwd` from `--path` itself
+  # (via `git rev-parse --show-toplevel`, same as everywhere else in
+  # `--path`'s handling: `path` may be absolute, or a relative one that
+  # escapes the current project) — rather than assuming `File.cwd!()` IS
+  # that repo — means `mix codegraph --diff` can point at any git repo's
+  # source from anywhere, not just when invoked from inside that repo.
+  # `path` itself doesn't move: it's rewritten to be relative to the
+  # resolved root, since that's what `git show <ref>:<path>` expects.
+  defp diff_root(path) do
+    expanded = Path.expand(path)
+
+    case System.cmd("git", ["rev-parse", "--show-toplevel"], cd: expanded, stderr_to_stdout: true) do
+      {root, 0} ->
+        root = String.trim(root)
+        {root, Path.relative_to(expanded, root)}
+
+      {error, _} ->
+        Mix.raise("--diff requires --path (#{path}) to be inside a git repository: #{error}")
+    end
+  end
 
   # A trailing "/N" (digits only) is treated as an arity, marking this
   # root as one specific function rather than a whole module — module
